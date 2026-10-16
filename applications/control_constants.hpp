@@ -19,6 +19,44 @@ static_assert(CHASSIS_POWER_LIMIT_W > 0.0f, "Power limit must be positive");
 static_assert(POWER_LIMIT_MARGIN_W >= 0.0f &&
               POWER_LIMIT_MARGIN_W < CHASSIS_POWER_LIMIT_W, "Invalid power margin");
 static_assert(POWER_LIMIT_SEARCH_STEPS > 0, "Search needs at least one step");
+// ===== Gimbal trajectory following =====
+// PID gains and hardware-dependent limits are UNSET placeholders, not tuned values.
+// Fill both axis configurations only after motor mapping, units, zero and direction
+// are known. Set configured=true, then explicitly call set_enabled(true).
+struct FollowPidConfig
+{
+  float kp;
+  float ki;
+  float kd;
+  float integral_limit;  // Maximum absolute integral contribution, in PID output units.
+};
+
+struct FollowAxisConfig
+{
+  FollowPidConfig angle_pid;  // Output: rad/s; input: joint angle rad.
+  FollowPidConfig speed_pid;  // Output: future motor-driver command units.
+  float angle_min_rad;       // Mechanical joint limits; NOT trajectory range.
+  float angle_max_rad;
+  float max_speed_rad_s;
+  float max_output;          // Symmetric bound in future motor-driver command units.
+  float velocity_feedforward_gain;
+  bool configured;
+};
+
+constexpr unsigned FOLLOW_PERIOD_MS = 1U;
+constexpr unsigned FOLLOW_FEEDBACK_TIMEOUT_MS = 100U;  // Software initial setting.
+constexpr unsigned FOLLOW_MAX_STEP_MS = 10U;  // Reset PID after a long scheduling gap.
+// Order: {Kp, Ki, Kd, integral limit} for angle loop, then speed loop;
+// angle min, angle max, speed limit, output limit, velocity feedforward gain, ready.
+constexpr FollowAxisConfig FOLLOW_YAW = {
+  {0.0f, 0.0f, 0.0f, 0.0f},
+  {0.0f, 0.0f, 0.0f, 0.0f},
+  0.0f, 0.0f, 0.0f, 0.0f, 1.0f, false};
+constexpr FollowAxisConfig FOLLOW_PITCH = {
+  {0.0f, 0.0f, 0.0f, 0.0f},
+  {0.0f, 0.0f, 0.0f, 0.0f},
+  0.0f, 0.0f, 0.0f, 0.0f, 1.0f, false};
+
 }  // namespace control_constants
 
 #endif  // CONTROL_CONSTANTS_HPP

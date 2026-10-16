@@ -57,6 +57,7 @@ osThreadId plot_taskHandle;
 osThreadId fold_taskHandle;
 osThreadId auto_taskHandle;
 osThreadId trajectory_taskHandle;
+osThreadId trajectory_followHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -73,6 +74,7 @@ void StartPlotTask(void const * argument);
 void StartFoldTAsk(void const * argument);
 void StartAutoTask(void const * argument);
 void StartTrajectoryTask(void const * argument);
+void StartTrajectoryFollow(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -159,6 +161,10 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of trajectory_task */
   osThreadDef(trajectory_task, StartTrajectoryTask, osPriorityNormal, 0, 256);
   trajectory_taskHandle = osThreadCreate(osThread(trajectory_task), NULL);
+
+  /* definition and creation of trajectory_follow */
+  osThreadDef(trajectory_follow, StartTrajectoryFollow, osPriorityNormal, 0, 256);
+  trajectory_followHandle = osThreadCreate(osThread(trajectory_follow), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -332,6 +338,21 @@ void StartTrajectoryTask(void const * argument)
     osDelay(1);
   }
   /* USER CODE END StartTrajectoryTask */
+}
+
+/* USER CODE BEGIN Header_StartTrajectoryFollow */
+/**
+* @brief Function implementing the trajectory_follow thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTrajectoryFollow */
+void StartTrajectoryFollow(void const * argument)
+{
+  /* USER CODE BEGIN StartTrajectoryFollow */
+  extern void trajectory_follow_task(void const * argument);
+  trajectory_follow_task(argument);
+  /* USER CODE END StartTrajectoryFollow */
 }
 
 /* Private application code --------------------------------------------------*/
