@@ -55,6 +55,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/applications/plot_task.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/applications/fold_task.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/applications/auto_task.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/applications/trajectory_task.cpp
 
     # ==== sp_middleware ====
     ${CMAKE_CURRENT_SOURCE_DIR}/sp_middleware/io/led/led.cpp

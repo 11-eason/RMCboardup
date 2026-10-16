@@ -56,6 +56,7 @@ osThreadId buzzer_taskHandle;
 osThreadId plot_taskHandle;
 osThreadId fold_taskHandle;
 osThreadId auto_taskHandle;
+osThreadId trajectory_taskHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -71,6 +72,7 @@ void StartBuzzerTask(void const * argument);
 void StartPlotTask(void const * argument);
 void StartFoldTAsk(void const * argument);
 void StartAutoTask(void const * argument);
+void StartTrajectoryTask(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -153,6 +155,10 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of auto_task */
   osThreadDef(auto_task, StartAutoTask, osPriorityNormal, 0, 256);
   auto_taskHandle = osThreadCreate(osThread(auto_task), NULL);
+
+  /* definition and creation of trajectory_task */
+  osThreadDef(trajectory_task, StartTrajectoryTask, osPriorityNormal, 0, 256);
+  trajectory_taskHandle = osThreadCreate(osThread(trajectory_task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -306,6 +312,26 @@ void StartAutoTask(void const * argument)
   extern void auto_task(void);
   auto_task();
   /* USER CODE END StartAutoTask */
+}
+
+/* USER CODE BEGIN Header_StartTrajectoryTask */
+/**
+* @brief Function implementing the trajectory_task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTrajectoryTask */
+void StartTrajectoryTask(void const * argument)
+{
+  /* USER CODE BEGIN StartTrajectoryTask */
+  extern void trajectory_task(void const * argument);
+  trajectory_task(argument);
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartTrajectoryTask */
 }
 
 /* Private application code --------------------------------------------------*/
