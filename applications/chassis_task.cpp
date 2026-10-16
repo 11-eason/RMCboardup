@@ -1,5 +1,6 @@
 #include "cmsis_os.h"
 #include "power_model.hpp"
+#include "power_meter.hpp"
 #include "io/can/can.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
 #include "shared_data.hpp"
@@ -16,7 +17,8 @@ constexpr float GEAR_RATIO = 14.9f;
 constexpr float MAX_TORQUE = 3.0f;
 }  // namespace
 
-sp::CAN can1(&hcan1);
+sp::CAN can1(&hcan1);  // Chassis motors.
+sp::CAN power_meter_can2(&hcan2);  // Dedicated power-meter bus.
 
 sp::RM_Motor motor_fl(1, sp::RM_Motors::M3508, GEAR_RATIO);
 sp::RM_Motor motor_fr(2, sp::RM_Motors::M3508, GEAR_RATIO);
@@ -31,7 +33,7 @@ sp::PID pid_rr(1e-3f, 500.0f, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
 namespace
 {
 // Keep all model mathematics in power_model.cpp.
-void update_power_prediction(float fl, float fr, float rl, float rr)
+float update_power_prediction(float fl, float fr, float rl, float rr)
 {
   const uint32_t now = osKernelSysTick();
   const bool feedback_valid = motor_fl.is_alive(now) && motor_fr.is_alive(now) &&
@@ -39,7 +41,9 @@ void update_power_prediction(float fl, float fr, float rl, float rr)
   const chassis_power::MotorState motors[chassis_power::MOTOR_COUNT] = {
     {fl, motor_fl.speed}, {fr, motor_fr.speed},
     {rl, motor_rl.speed}, {rr, motor_rr.speed}};
-  chassis_power::g_prediction = chassis_power::predict(motors, feedback_valid);
+  chassis_power::g_limit_result = chassis_power::limit(motors, feedback_valid);
+  chassis_power::g_prediction = chassis_power::g_limit_result.before;
+  return chassis_power::g_limit_result.torque_scale;
 }
 
 void set_all_zero()
@@ -68,12 +72,13 @@ void drive_with(float vx, float vy, float omega)
   pid_rl.calc(w_rl, motor_rl.speed);
   pid_rr.calc(w_rr, motor_rr.speed);
 
-  update_power_prediction(pid_fl.out, pid_fr.out, pid_rl.out, pid_rr.out);
+  const float power_scale =
+    update_power_prediction(pid_fl.out, pid_fr.out, pid_rl.out, pid_rr.out);
 
-  motor_fl.cmd(pid_fl.out);
-  motor_fr.cmd(pid_fr.out);
-  motor_rl.cmd(pid_rl.out);
-  motor_rr.cmd(pid_rr.out);
+  motor_fl.cmd(power_scale * pid_fl.out);
+  motor_fr.cmd(power_scale * pid_fr.out);
+  motor_rl.cmd(power_scale * pid_rl.out);
+  motor_rr.cmd(power_scale * pid_rr.out);
 }
 
 void chassis_update()
@@ -108,6 +113,8 @@ extern "C" void chassis_task()
 {
   can1.config();
   can1.start();
+  power_meter_can2.config();
+  power_meter_can2.start();
 
   uint32_t last_wake = osKernelSysTick();
 
@@ -126,11 +133,26 @@ extern "C" void chassis_task()
 
 extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
 {
+  if (hcan != &hcan1 && hcan != &hcan2) return;
   auto stamp_ms = osKernelSysTick();
 
   while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0) {
-    if (hcan == &hcan1) {
-      can1.recv();
+    if (hcan == &hcan2) {
+      CAN_RxHeaderTypeDef header = {};
+      uint8_t data[8] = {};
+      if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
+        break;
+      power_meter::receive(header, data, stamp_ms);
+    }
+    else if (hcan == &hcan1) {
+      // CAN1 is reserved for chassis motor feedback.
+      CAN_RxHeaderTypeDef header = {};
+      if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, can1.rx_data) != HAL_OK)
+        break;
+      can1.frame_type = (header.IDE == CAN_ID_EXT);
+      can1.rx_id = can1.frame_type ? header.ExtId : header.StdId;
+      if (header.IDE != CAN_ID_STD || header.RTR != CAN_RTR_DATA || header.DLC != 8)
+        continue;
       if (can1.rx_id == motor_fl.rx_id)
         motor_fl.read(can1.rx_data, stamp_ms);
       else if (can1.rx_id == motor_fr.rx_id)
