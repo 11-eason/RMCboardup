@@ -1,4 +1,8 @@
 #include "cmsis_os.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "power_model.hpp"
+#include "power_meter.hpp"
 #include "io/can/can.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
 #include "shared_data.hpp"
@@ -48,8 +52,25 @@ sp::PID pid_rr(1e-3f, 2.0f, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
 
 namespace
 {
+float update_power_prediction(float fl, float fr, float rl, float rr)
+{
+  const uint32_t now = osKernelSysTick();
+  taskENTER_CRITICAL();
+  const bool valid = motor_fl.is_alive(now) && motor_fr.is_alive(now) &&
+                     motor_rl.is_alive(now) && motor_rr.is_alive(now);
+  // Torque and speed use the same physical motor-output direction convention.
+  const chassis_power::MotorState motors[chassis_power::MOTOR_COUNT] = {
+    {fl, motor_fl.speed}, {fr, motor_fr.speed},
+    {rl, motor_rl.speed}, {rr, motor_rr.speed}};
+  taskEXIT_CRITICAL();
+  chassis_power::g_limit_result = chassis_power::limit(motors, valid);
+  chassis_power::g_prediction = chassis_power::g_limit_result.before;
+  return chassis_power::g_limit_result.torque_scale;
+}
+
 void set_all_zero()
 {
+  update_power_prediction(0.0f, 0.0f, 0.0f, 0.0f);
   motor_fl.cmd(0.0f);
   motor_fr.cmd(0.0f);
   motor_rl.cmd(0.0f);
@@ -68,10 +89,15 @@ void drive_with(float vx, float vy, float omega)
   pid_rl.calc(v_3, motor_rl.speed * DIR_M_RL);
   pid_rr.calc(v_4, motor_rr.speed * DIR_M_RR);
 
-  motor_fl.cmd(pid_fl.out * DIR_M_FL);
-  motor_fr.cmd(pid_fr.out * DIR_M_FR);
-  motor_rl.cmd(pid_rl.out * DIR_M_RL);
-  motor_rr.cmd(pid_rr.out * DIR_M_RR);
+  const float fl = pid_fl.out * DIR_M_FL;
+  const float fr = pid_fr.out * DIR_M_FR;
+  const float rl = pid_rl.out * DIR_M_RL;
+  const float rr = pid_rr.out * DIR_M_RR;
+  const float power_scale = update_power_prediction(fl, fr, rl, rr);
+  motor_fl.cmd(power_scale * fl);
+  motor_fr.cmd(power_scale * fr);
+  motor_rl.cmd(power_scale * rl);
+  motor_rr.cmd(power_scale * rr);
 }
 
 void chassis_update()
@@ -117,34 +143,44 @@ extern "C" void chassis_task()
   }
 }
 
-extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
+// One dispatcher, one FIFO read per frame. No undefined gimbal objects.
+namespace
 {
-  if (hcan != &hcan1) return;
-  auto stamp_ms = osKernelSysTick();
-
-  while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0) {
-    if (hcan == &hcan1) {
-      can1.recv(CAN_RX_FIFO0);
-      if (can1.rx_id == motor_fl.rx_id)
-        motor_fl.read(can1.rx_data, stamp_ms);
-      else if (can1.rx_id == motor_fr.rx_id)
-        motor_fr.read(can1.rx_data, stamp_ms);
-      else if (can1.rx_id == motor_rl.rx_id)
-        motor_rl.read(can1.rx_data, stamp_ms);
-      else if (can1.rx_id == motor_rr.rx_id)
-        motor_rr.read(can1.rx_data, stamp_ms);
-    }
-  }
-}
-
-// No CAN2 application devices are defined in this project yet.
-// Consume unused FIFO1 frames without referring to missing motor objects.
-extern "C" void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef * hcan)
+void receive_can_fifo(CAN_HandleTypeDef * hcan, uint32_t fifo)
 {
   if (hcan != &hcan1 && hcan != &hcan2) return;
-  while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO1) > 0) {
+  while (HAL_CAN_GetRxFifoFillLevel(hcan, fifo) > 0) {
     CAN_RxHeaderTypeDef header = {};
     uint8_t data[8] = {};
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK) break;
+    if (HAL_CAN_GetRxMessage(hcan, fifo, &header, data) != HAL_OK) break;
+    // CAN2 has no configured application devices yet; consume and ignore its frames.
+    if (hcan != &hcan1) continue;
+    can1.frame_type = (header.IDE == CAN_ID_EXT);
+    can1.rx_id = can1.frame_type ? header.ExtId : header.StdId;
+    if (header.IDE != CAN_ID_STD || header.RTR != CAN_RTR_DATA || header.DLC != 8)
+      continue;
+    for (unsigned i = 0; i < 8; ++i) can1.rx_data[i] = data[i];
+    const uint32_t stamp_ms = osKernelSysTick();
+    if (header.StdId == power_meter::FEEDBACK_ID)
+      power_meter::receive(header, data, stamp_ms);
+    else if (header.StdId == motor_fl.rx_id)
+      motor_fl.read(data, stamp_ms);
+    else if (header.StdId == motor_fr.rx_id)
+      motor_fr.read(data, stamp_ms);
+    else if (header.StdId == motor_rl.rx_id)
+      motor_rl.read(data, stamp_ms);
+    else if (header.StdId == motor_rr.rx_id)
+      motor_rr.read(data, stamp_ms);
   }
+}
+}  // namespace
+
+extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
+{
+  receive_can_fifo(hcan, CAN_RX_FIFO0);
+}
+
+extern "C" void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef * hcan)
+{
+  receive_can_fifo(hcan, CAN_RX_FIFO1);
 }
