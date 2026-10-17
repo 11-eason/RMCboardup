@@ -42,6 +42,10 @@ Prediction predict(const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid)
     result.calibrated = control_constants::POWER_MODEL_CALIBRATED;
     return result;
   }
+  // Report nonnegative electrical consumption. Signed mechanical power is
+  // retained for braking diagnostics; do not use abs(), which would turn
+  // negative model values into artificial positive consumption.
+  if (result.total_w < 0.0f) result.total_w = 0.0f;
   result.valid = feedback_valid;
   return result;
 }
@@ -67,7 +71,7 @@ LimitResult limit(const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid)
     return result;
   }
 
-  // P(k) = a*k*k + b*k + c. a >= 0; braking can make b negative.
+  // Raw P(k) = a*k*k + b*k + c; reported power is max(0, P(k)).
   // Find the constrained minimum first, then search its increasing branch.
   const double a = result.before.torque_loss_w;
   const double b = result.before.mechanical_w;

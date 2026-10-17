@@ -19,7 +19,7 @@ struct Prediction
   float torque_loss_w;
   float speed_loss_w;
   float idle_loss_w;
-  float total_w;  // Signed model output; negative values are not clamped.
+  float total_w;  // Electrical consumption estimate, clamped to >= 0 W.
   bool valid;  // Finite inputs/parameters/results AND all feedback fresh.
   bool calibrated;  // Independent of valid: initial coefficients are uncalibrated.
 };

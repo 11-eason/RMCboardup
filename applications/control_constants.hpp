@@ -6,9 +6,9 @@ namespace control_constants
 // Initial tuning values only; NOT calibrated for this chassis.
 // Torque: gearbox output shaft N*m; speed: same shaft rad/s.
 // Refit K1/K2 if the shaft convention or actual gear ratio changes.
-constexpr float POWER_K1 = 1.9f;   // W / (N*m)^2
-constexpr float POWER_K2 = 0.01f;  // W / (rad/s)^2
-constexpr float POWER_K3 = 4.0f;   // W, TOTAL chassis idle loss; measure before calibration.
+constexpr float POWER_K1 = 1.93f;    // W / (N*m)^2
+constexpr float POWER_K2 = 0.0088f;  // W / (rad/s)^2
+constexpr float POWER_K3 = 4.0f;     // W, TOTAL chassis idle loss; measure before calibration.
 constexpr bool POWER_MODEL_CALIBRATED = false;
 
 constexpr float CHASSIS_POWER_LIMIT_W = 80.0f;
