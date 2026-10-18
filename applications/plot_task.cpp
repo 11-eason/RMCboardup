@@ -9,19 +9,14 @@
 #include "usart.h"
 
 // 串口输出方式不变：sp::Plotter 二进制帧（0xAA 0xBB + 长度 + float 数组），
-// USART1、每 20 ms 一帧。只画 7 条通道：
+// USART1 @ 921600、每 20 ms 一帧。这里只画 4 条曲线：
 //
-//   1  yaw 目标角 (rad)   ← 轨迹本身
-//   2  yaw 实际角 (rad)   ← 电机自己的曲线，与 1 同量、同画法，直接叠起来比
-//   3  yaw 角度误差 (rad) ← 就是 1 和 2 的差，用来看峰谷处差多少
-//   4  pitch 目标角 (rad)
-//   5  pitch 实际角 (rad)
-//   6  pitch 角度误差 (rad)
-//   7  状态：0 停止 / 1 正在跟随 / 10+故障码（11 跟踪误差、12 超速、13 反馈丢失、
-//      14 时序超限、15 配置无效）
+//   1  yaw 目标角 (rad)      ← 轨迹给的目标
+//   2  yaw 实际角 (rad)      ← 电机实际跟随的曲线
+//   3  pitch 目标角 (rad)
+//   4  pitch 实际角 (rad)
 //
-// 评价方式：把 1 和 2 叠在一起，两条曲线重合度就是跟踪效果；
-// 3 用来量化"差多少度"。若曲线出现高频毛刺，说明内环在振荡（看力矩限幅/增益）。
+// 评价方式：把 1/2、3/4 各自叠在一起看重合度，差别就是跟踪误差。
 
 sp::Plotter plotter(&huart1, false);
 
@@ -41,15 +36,9 @@ extern "C" void plot_task()
       plotter.plot(target.yaw, target.pitch);
     } else {
       const auto state = trajectory_follow::read();
-      const float status = state.active
-                             ? 1.0f
-                             : (state.fault == trajectory_follow::FAULT_NONE
-                                  ? 0.0f
-                                  : 10.0f + static_cast<float>(state.fault));
       plotter.plot(
-        state.yaw.target_angle_rad, state.yaw.actual_angle_rad, state.yaw.angle_error_rad,
-        state.pitch.target_angle_rad, state.pitch.actual_angle_rad, state.pitch.angle_error_rad,
-        status);
+        state.yaw.target_angle_rad, state.yaw.actual_angle_rad, state.pitch.target_angle_rad,
+        state.pitch.actual_angle_rad);
     }
   }
 }

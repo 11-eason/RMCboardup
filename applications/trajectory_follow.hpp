@@ -37,6 +37,8 @@ struct AxisResult
   float speed_command_rad_s;       // 斜坡后，速度环的目标转速
   float accel_feedforward_nm;      // J·α 力矩前馈
   float gravity_feedforward_nm;    // K_g·cos(θ) 重力前馈
+  float friction_feedforward_nm;   // 库仑摩擦前馈
+  float breakaway_feedforward_nm;  // 静摩擦脱困辅助力矩
   float control_output;            // 力矩指令，N*m
   bool angle_limited;
   bool speed_limited;

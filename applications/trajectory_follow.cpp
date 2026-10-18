@@ -42,6 +42,8 @@ struct AxisState
   PidState angle;
   PidState speed;
   float speed_command = 0.0f;  // 斜坡后的目标转速
+  float ff_direction = 0.0f;   // 低通后的速度指令，仅用于摩擦前馈取方向
+  bool breakaway = false;      // 静摩擦脱困是否正在生效
 };
 
 // ---- 电机对象（CAN1，GM6020 电流模式，由 chassis_task 负责总线初始化）----
@@ -176,6 +178,44 @@ AxisResult update_axis(
   // 力矩前馈：加速度前馈 J·α（补惯性）+ 重力前馈 K_g·cosθ（补偏置质量）
   r.accel_feedforward_nm = c.accel_feedforward_j * ref_acc;
   r.gravity_feedforward_nm = c.gravity_coefficient_nm * std::cos(f.angle_rad);
+  // 摩擦前馈：沿"速度指令方向"补库仑摩擦。
+  // 注意这一版的取舍（实测对比过）：
+  //   用 speed_command（含位置环误差修正）→ 低速段跟得更紧，但它在闭环内，
+  //   小信号等效增益 = friction_nm / blend = 0.07/0.02 = 3.5 N·m/(rad/s)，
+  //   而速度环 Kp 只有 0.015，相当于把内环增益放大约 230 倍 →
+  //   平台段过零时力矩在 ±friction_nm 之间翻转，裸电机会震动。
+  //   用 ref_rate（参考角速度）→ 不震，但平台段参考速度≈0 时前馈也归零，
+  //   跟踪会松 0.5~1 deg。这里按实测结果选用 speed_command。
+  if (c.friction_nm > 0.0f) {
+    const float blend = control_constants::FOLLOW_FRICTION_BLEND_RAD_S;
+    // 方向信号先低通：轨迹每周期有 6 个停顿反向点，速度指令会在 ±小值之间逐拍抖动，
+    // 直接用它的符号会让力矩每拍翻转 ±friction_nm，裸电机就会高频震动。
+    const float filter = control_constants::FOLLOW_FRICTION_FILTER_S;
+    if (filter > 0.0f) {
+      const float alpha = dt / (filter + dt);
+      state.ff_direction += alpha * (state.speed_command - state.ff_direction);
+    } else {
+      state.ff_direction = state.speed_command;
+    }
+    r.friction_feedforward_nm =
+      c.friction_nm * (state.ff_direction / (std::fabs(state.ff_direction) + blend));
+  }
+  // 静摩擦脱困：平台段参考速度≈0，前馈也归零，电机会被静摩擦粘住。
+  // 误差超过 ON 且几乎不动 → 沿误差方向补一个摩擦力矩；误差回到 OFF 以下或已动起来 → 撤销。
+  // 滞环 + 速度判据保证不会在阈值附近抖动，也不会干扰高速段。
+  const float kick_on = control_constants::FOLLOW_BREAKAWAY_ON_RAD;
+  if (kick_on > 0.0f) {
+    const float speed_quiet = control_constants::FOLLOW_BREAKAWAY_SPEED_RAD_S;
+    const float error = std::fabs(r.angle_error_rad);
+    const float speed = std::fabs(f.speed_rad_s);
+    if (!state.breakaway && error > kick_on && speed < speed_quiet)
+      state.breakaway = true;
+    else if (state.breakaway &&
+             (error < control_constants::FOLLOW_BREAKAWAY_OFF_RAD || speed > 2.0f * speed_quiet))
+      state.breakaway = false;
+    if (state.breakaway)
+      r.breakaway_feedforward_nm = r.angle_error_rad > 0.0f ? c.friction_nm : -c.friction_nm;
+  }
 
   float min_out = -c.max_output;
   float max_out = c.max_output;
@@ -183,7 +223,9 @@ AxisResult update_axis(
   if (bounded && f.angle_rad >= c.angle_max_rad) max_out = 0.0f;
   r.control_output = pid(
     state.speed, c.speed_pid, state.speed_command, f.speed_rad_s, dt,
-    r.accel_feedforward_nm + r.gravity_feedforward_nm, min_out, max_out, r.output_limited);
+    r.accel_feedforward_nm + r.gravity_feedforward_nm + r.friction_feedforward_nm +
+      r.breakaway_feedforward_nm,
+    min_out, max_out, r.output_limited);
   return r;
 }
 
