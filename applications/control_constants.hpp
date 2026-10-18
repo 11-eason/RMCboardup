@@ -1,8 +1,27 @@
-﻿#ifndef CONTROL_CONSTANTS_HPP
+#ifndef CONTROL_CONSTANTS_HPP
 #define CONTROL_CONSTANTS_HPP
 
 namespace control_constants
 {
+// GY-56 receive test: physical 3-pin UART1 = USART6.
+constexpr bool INFRARED_PLOT_TEST = true;
+constexpr bool INFRARED_PLOT_RAW_FIELDS = true;  // 8 channels; false restores 4.
+constexpr unsigned INFRARED_UART_BAUD = 115200U;  // Set 115200 if module was configured so.
+constexpr bool INFRARED_AUTO_BAUD = true;
+constexpr unsigned INFRARED_BAUD_PROBE_MS = 2000U;
+// 0: accept 3/4-byte payloads; nonzero: require this exact payload length.
+constexpr unsigned INFRARED_FRAME_DATA_LENGTH = 0U;
+// Assumed GY-56 distance field is cm. Use 0.1 if its manual specifies mm.
+constexpr float INFRARED_RAW_TO_CM = 1.0f;
+constexpr unsigned INFRARED_VALID_TIMEOUT_MS = 500U;
+static_assert(
+  INFRARED_UART_BAUD == 9600U || INFRARED_UART_BAUD == 115200U, "Unsupported GY-56 baud rate");
+static_assert(
+  (INFRARED_FRAME_DATA_LENGTH == 0U ||
+   (INFRARED_FRAME_DATA_LENGTH >= 2U && INFRARED_FRAME_DATA_LENGTH <= 8U)),
+  "Invalid GY-56 payload length");
+static_assert(INFRARED_RAW_TO_CM > 0.0f, "Invalid distance unit conversion");
+
 // Initial tuning values only; NOT calibrated for this chassis.
 // Torque: gearbox output shaft N*m; speed: same shaft rad/s.
 // Refit K1/K2 if the shaft convention or actual gear ratio changes.
@@ -54,7 +73,8 @@ constexpr float FOLLOW_TEST_TRIP_SPEED_RAD_S = 5.23598776f;  // 50 rpm，超速�
 constexpr bool FOLLOW_ENFORCE_ANGLE_LIMITS = false;
 // 时间缩放：1 = 原始 680 ms 周期（最快）；2/4 = 放慢并同时降低速度、加速度。
 constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 1U;
-constexpr bool FOLLOW_START_ENABLED = true;              // 上电即开始跟随（台架用）
+constexpr bool FOLLOW_START_ENABLED =
+  false;  // Sensor bench test: no automatic motor start.              // 上电即开始跟随（台架用）
 constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE = true;  // 上电自动记录初始姿态
 constexpr bool FOLLOW_USE_RC_STOP = false;               // 用遥控器右拨杆下档急停
 
