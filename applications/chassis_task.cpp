@@ -7,6 +7,8 @@
 #include "motor/rm_motor/rm_motor.hpp"
 #include "shared_data.hpp"
 #include "tools/pid/pid.hpp"
+#include "trajectory_follow.hpp"
+#include "control_constants.hpp"
 
 
 namespace
@@ -140,6 +142,7 @@ extern "C" void chassis_task()
     motor_rl.write(can1.tx_data);
     motor_rr.write(can1.tx_data);
     can1.send(motor_fl.tx_id);
+    trajectory_follow::transmit_can1(osKernelSysTick(), !control_constants::FOLLOW_USE_RC_STOP || g_data.sw_r != 0);
   }
 }
 
@@ -171,6 +174,8 @@ void receive_can_fifo(CAN_HandleTypeDef * hcan, uint32_t fifo)
       motor_rl.read(data, stamp_ms);
     else if (header.StdId == motor_rr.rx_id)
       motor_rr.read(data, stamp_ms);
+    else
+      trajectory_follow::receive_can1(header, data, stamp_ms);
   }
 }
 }  // namespace

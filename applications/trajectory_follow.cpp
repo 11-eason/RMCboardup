@@ -1,9 +1,22 @@
 #include "trajectory_follow.hpp"
 
 #include <cmath>
-#include "control_constants.hpp"
+
 #include "FreeRTOS.h"
 #include "task.h"
+#include "control_constants.hpp"
+#include "motor/rm_motor/rm_motor.hpp"
+#include "shared_data.hpp"
+
+// 云台轨迹跟随（裸电机阶段）
+//
+// 控制结构（每个控制周期执行一次）：
+//   参考角 + 速度前馈 ──> 位置环 P(+可选 I/D) ──> 目标转速限幅 ──> 目标转速斜坡
+//        ──> 速度环 PI ──> 力矩前馈(J·α + K_g·cosθ) ──> 力矩限幅 ──> CAN 0x1FE
+//
+// 关键约束：电机只在收到新电流帧时更新力矩，所以 FOLLOW_CAN_TX_INTERVAL_MS
+// 就是"执行器的采样周期"。闭环时间常数 τ = J/(Kt·Kp) 必须 ≥ 5~10 倍该周期，
+// 否则采样环自激，表现为满量程力矩正负翻转的"嗡嗡"振动。
 
 namespace trajectory_follow
 {
@@ -11,6 +24,7 @@ namespace
 {
 using control_constants::FollowAxisConfig;
 using control_constants::FollowPidConfig;
+
 static_assert(configTICK_RATE_HZ == 1000, "Trajectory follow requires 1 ms RTOS ticks");
 static_assert(sizeof(TickType_t) == sizeof(uint32_t), "32-bit ticks required");
 static_assert(control_constants::FOLLOW_PERIOD_MS > 0, "Invalid control period");
@@ -19,13 +33,46 @@ struct PidState
 {
   float integral = 0.0f;
   float previous_feedback = 0.0f;
+  float filtered_derivative = 0.0f;
   bool initialized = false;
 };
-struct AxisState { PidState angle; PidState speed; };
+
+struct AxisState
+{
+  PidState angle;
+  PidState speed;
+  float speed_command = 0.0f;  // 斜坡后的目标转速
+};
+
+// ---- 电机对象（CAN1，GM6020 电流模式，由 chassis_task 负责总线初始化）----
+sp::RM_Motor yaw_motor(
+  control_constants::FOLLOW_YAW_MOTOR_ID, sp::RM_Motors::GM6020,
+  control_constants::FOLLOW_YAW_RATIO);
+sp::RM_Motor pitch_motor(
+  control_constants::FOLLOW_PITCH_MOTOR_ID, sp::RM_Motors::GM6020,
+  control_constants::FOLLOW_PITCH_RATIO);
+
+// ---- 共享状态 ----
 Feedback feedback = {};
 Result latest = {};
-bool enabled = false;
-AxisState yaw_state, pitch_state;
+TransportStatus transport = {};
+bool enabled = control_constants::FOLLOW_START_ENABLED;
+bool capture_requested = false;
+bool initial_pose_captured = false;
+bool startup_capture_allowed = control_constants::FOLLOW_AUTO_CAPTURE_INITIAL_POSE;
+float yaw_origin = 0.0f;
+float pitch_origin = 0.0f;
+uint32_t yaw_stamp = 0;
+uint32_t pitch_stamp = 0;
+float requested_yaw_torque = 0.0f;
+float requested_pitch_torque = 0.0f;
+uint32_t command_stamp = 0;
+bool command_active = false;
+uint32_t last_tx_ms = 0;
+bool sent_once = false;
+uint8_t fault_code = FAULT_NONE;
+AxisState yaw_state;
+AxisState pitch_state;
 
 float clamp(float value, float low, float high)
 {
@@ -34,20 +81,25 @@ float clamp(float value, float low, float high)
 
 bool gains_valid(const FollowPidConfig & pid)
 {
-  return std::isfinite(pid.kp) && pid.kp >= 0.0f &&
-         std::isfinite(pid.ki) && pid.ki >= 0.0f &&
-         std::isfinite(pid.kd) && pid.kd >= 0.0f &&
-         std::isfinite(pid.integral_limit) && pid.integral_limit >= 0.0f;
+  return std::isfinite(pid.kp) && pid.kp >= 0.0f && std::isfinite(pid.ki) && pid.ki >= 0.0f &&
+         std::isfinite(pid.kd) && pid.kd >= 0.0f && std::isfinite(pid.integral_limit) &&
+         pid.integral_limit >= 0.0f;
 }
 
 bool configured(const FollowAxisConfig & c)
 {
   return c.configured && gains_valid(c.angle_pid) && gains_valid(c.speed_pid) &&
-         std::isfinite(c.angle_min_rad) && std::isfinite(c.angle_max_rad) &&
-         c.angle_min_rad < c.angle_max_rad &&
+         (!control_constants::FOLLOW_ENFORCE_ANGLE_LIMITS ||
+          (std::isfinite(c.angle_min_rad) && std::isfinite(c.angle_max_rad) &&
+           c.angle_min_rad < c.angle_max_rad)) &&
          std::isfinite(c.max_speed_rad_s) && c.max_speed_rad_s > 0.0f &&
-         std::isfinite(c.max_output) && c.max_output > 0.0f &&
-         std::isfinite(c.velocity_feedforward_gain) && c.velocity_feedforward_gain >= 0.0f;
+         std::isfinite(c.max_accel_rad_s2) && c.max_accel_rad_s2 > 0.0f &&
+         std::isfinite(c.max_output) && c.max_output > 0.0f && c.max_output <= sp::GM6020_MAX_TORQUE &&
+         std::isfinite(c.velocity_feedforward_gain) && c.velocity_feedforward_gain >= 0.0f &&
+         std::isfinite(c.accel_feedforward_j) && c.accel_feedforward_j >= 0.0f &&
+         std::isfinite(c.gravity_coefficient_nm) && c.gravity_coefficient_nm >= 0.0f &&
+         (c.angle_pid.kp + c.angle_pid.ki + c.angle_pid.kd) > 0.0f &&
+         (c.speed_pid.kp + c.speed_pid.ki + c.speed_pid.kd) > 0.0f;
 }
 
 bool fresh(const AxisFeedback & f, uint32_t now)
@@ -56,20 +108,21 @@ bool fresh(const AxisFeedback & f, uint32_t now)
          (now - f.stamp_ms) < control_constants::FOLLOW_FEEDBACK_TIMEOUT_MS;
 }
 
-// Derivative on measurement avoids a kick from a target step.
-// Conditional integration accounts for feedforward AND final output saturation.
-float pid(PidState & state, const FollowPidConfig & config, float target,
-          float actual, float dt, float feedforward, float low, float high,
-          bool & saturated)
+// 微分先行 + 条件积分。target 与 actual 用同一坐标；饱和时停止积分避免积分饱和。
+float pid(
+  PidState & state, const FollowPidConfig & config, float target, float actual, float dt,
+  float feedforward, float low, float high, bool & saturated)
 {
   const float error = target - actual;
   const float derivative = state.initialized ? -(actual - state.previous_feedback) / dt : 0.0f;
+  const float alpha = dt / (control_constants::FOLLOW_D_FILTER_S + dt);
+  state.filtered_derivative += alpha * (derivative - state.filtered_derivative);
   state.previous_feedback = actual;
   state.initialized = true;
   const float increment = config.ki * error * dt;
-  const float candidate_i = clamp(state.integral + increment,
-                                  -config.integral_limit, config.integral_limit);
-  const float base = feedforward + config.kp * error + config.kd * derivative;
+  const float candidate_i =
+    clamp(state.integral + increment, -config.integral_limit, config.integral_limit);
+  const float base = feedforward + config.kp * error + config.kd * state.filtered_derivative;
   const float candidate = base + candidate_i;
   if (!((candidate > high && increment > 0.0f) || (candidate < low && increment < 0.0f)))
     state.integral = candidate_i;
@@ -79,71 +132,142 @@ float pid(PidState & state, const FollowPidConfig & config, float target,
   return output;
 }
 
-AxisResult update_axis(AxisState & state, const FollowAxisConfig & c,
-                       float target_angle, float target_speed,
-                       const AxisFeedback & f, float dt)
+// 单轴：位置环 → 目标转速限幅 → 斜坡 → 速度环（含力矩前馈）→ 力矩限幅
+AxisResult update_axis(
+  AxisState & state, const FollowAxisConfig & c, const AxisFeedback & f, float ref_angle,
+  float ref_rate, float ref_acc, float dt)
 {
-  AxisResult result = {};
-  result.target_angle_rad = target_angle;
-  result.limited_angle_rad = clamp(target_angle, c.angle_min_rad, c.angle_max_rad);
-  result.angle_limited = target_angle != result.limited_angle_rad;
-  result.actual_angle_rad = f.angle_rad;
-  result.actual_speed_rad_s = f.speed_rad_s;
-  result.angle_error_rad = result.limited_angle_rad - f.angle_rad;
-  // Remove the original trajectory's velocity when its position was clipped.
-  float ff = result.angle_limited ? 0.0f : c.velocity_feedforward_gain * target_speed;
-  if ((result.limited_angle_rad <= c.angle_min_rad && ff < 0.0f) ||
-      (result.limited_angle_rad >= c.angle_max_rad && ff > 0.0f)) ff = 0.0f;
-  result.speed_feedforward_rad_s = ff;
-  float min_speed = -c.max_speed_rad_s, max_speed = c.max_speed_rad_s;
-  // At the measured joint limit, forbid requesting further outward motion.
-  if (f.angle_rad <= c.angle_min_rad) min_speed = 0.0f;
-  if (f.angle_rad >= c.angle_max_rad) max_speed = 0.0f;
-  result.speed_command_rad_s = pid(state.angle, c.angle_pid, result.limited_angle_rad,
-    f.angle_rad, dt, ff, min_speed, max_speed, result.speed_limited);
-  float min_output = -c.max_output, max_output = c.max_output;
-  if (f.angle_rad <= c.angle_min_rad) min_output = 0.0f;
-  if (f.angle_rad >= c.angle_max_rad) max_output = 0.0f;
-  result.control_output = pid(state.speed, c.speed_pid, result.speed_command_rad_s,
-    f.speed_rad_s, dt, 0.0f, min_output, max_output, result.output_limited);
-  return result;
+  AxisResult r = {};
+  r.target_angle_rad = ref_angle;
+  r.target_speed_rad_s = ref_rate;
+  r.target_acceleration_rad_s2 = ref_acc;
+  r.actual_angle_rad = f.angle_rad;
+  r.actual_speed_rad_s = f.speed_rad_s;
+
+  const bool bounded = control_constants::FOLLOW_ENFORCE_ANGLE_LIMITS;
+  const float target =
+    bounded ? clamp(ref_angle, c.angle_min_rad, c.angle_max_rad) : ref_angle;
+  r.limited_angle_rad = target;
+  r.angle_limited = target != ref_angle;
+  r.angle_error_rad = target - f.angle_rad;
+
+  // 速度前馈：把参考角速度直接加到目标转速上，消除 P 环的固有跟踪滞后。
+  float speed_ff = c.velocity_feedforward_gain * ref_rate;
+  if (r.angle_limited) speed_ff = 0.0f;  // 被限位截断时不再前馈
+  r.speed_feedforward_rad_s = speed_ff;
+
+  float min_speed = -c.max_speed_rad_s;
+  float max_speed = c.max_speed_rad_s;
+  if (bounded && f.angle_rad <= c.angle_min_rad) min_speed = 0.0f;  // 到限位不许继续往外
+  if (bounded && f.angle_rad >= c.angle_max_rad) max_speed = 0.0f;
+
+  r.speed_demand_rad_s =
+    pid(state.angle, c.angle_pid, target, f.angle_rad, dt, speed_ff, min_speed, max_speed,
+        r.speed_limited);
+
+  // 目标转速斜坡：限制加速度冲击。必须 ≥ 轨迹峰值加速度，否则会压住曲线。
+  const float max_change = c.max_accel_rad_s2 * dt;
+  state.speed_command +=
+    clamp(r.speed_demand_rad_s - state.speed_command, -max_change, max_change);
+  state.speed_command = clamp(state.speed_command, min_speed, max_speed);
+  r.speed_command_rad_s = state.speed_command;
+  r.speed_limited = r.speed_limited || (r.speed_demand_rad_s != state.speed_command);
+
+  // 力矩前馈：加速度前馈 J·α（补惯性）+ 重力前馈 K_g·cosθ（补偏置质量）
+  r.accel_feedforward_nm = c.accel_feedforward_j * ref_acc;
+  r.gravity_feedforward_nm = c.gravity_coefficient_nm * std::cos(f.angle_rad);
+
+  float min_out = -c.max_output;
+  float max_out = c.max_output;
+  if (bounded && f.angle_rad <= c.angle_min_rad) min_out = 0.0f;
+  if (bounded && f.angle_rad >= c.angle_max_rad) max_out = 0.0f;
+  r.control_output = pid(
+    state.speed, c.speed_pid, state.speed_command, f.speed_rad_s, dt,
+    r.accel_feedforward_nm + r.gravity_feedforward_nm, min_out, max_out, r.output_limited);
+  return r;
 }
 
 bool finite_output(const AxisResult & r)
 {
   return std::isfinite(r.control_output) && std::isfinite(r.speed_command_rad_s) &&
-         std::isfinite(r.angle_error_rad) && std::isfinite(r.speed_feedforward_rad_s);
+         std::isfinite(r.angle_error_rad);
 }
 
-void step(const TrajectoryPoint & target, const Feedback & f,
-          bool run, uint32_t now, float dt)
+void reset_axis(AxisState & state)
+{
+  state = AxisState{};
+}
+
+void latch_fault(uint8_t code)
+{
+  taskENTER_CRITICAL();
+  enabled = false;
+  command_active = false;
+  requested_yaw_torque = 0.0f;
+  requested_pitch_torque = 0.0f;
+  fault_code = code;
+  taskEXIT_CRITICAL();
+}
+
+void step(
+  const TrajectoryPoint & target, const Feedback & f, bool run, uint32_t now, float dt,
+  uint32_t phase_ms, bool rc_stop)
 {
   Result result = {};
   result.stamp_ms = now;
+  result.calibrated = initial_pose_captured;
+  result.rc_stop = rc_stop;
+  result.trajectory_elapsed_ms = phase_ms;
+  result.fault = fault_code;
   result.configuration_ready = configured(control_constants::FOLLOW_YAW) &&
-                               configured(control_constants::FOLLOW_PITCH);
-  result.feedback_fresh = fresh(f.yaw, now) && fresh(f.pitch, now);
+    (control_constants::FOLLOW_SINGLE_YAW || configured(control_constants::FOLLOW_PITCH));
+  result.feedback_fresh = fresh(f.yaw, now) &&
+    (control_constants::FOLLOW_SINGLE_YAW || fresh(f.pitch, now));
   const bool target_valid = std::isfinite(target.yaw) && std::isfinite(target.yaw_vel) &&
-                            std::isfinite(target.pitch) && std::isfinite(target.pitch_vel);
-  // Preserve references/feedback for plotting even while the controller is disabled.
+                            std::isfinite(target.yaw_acc) && std::isfinite(target.pitch) &&
+                            std::isfinite(target.pitch_vel) && std::isfinite(target.pitch_acc);
+
+  // 停机时也把参考/反馈填进去，方便在曲线上对照"是没进闭环还是跟不好"。
   result.yaw.target_angle_rad = target.yaw;
-  result.pitch.target_angle_rad = target.pitch;
+  result.yaw.target_speed_rad_s = target.yaw_vel;
+  result.yaw.target_acceleration_rad_s2 = target.yaw_acc;
   result.yaw.actual_angle_rad = f.yaw.angle_rad;
-  result.pitch.actual_angle_rad = f.pitch.angle_rad;
   result.yaw.actual_speed_rad_s = f.yaw.speed_rad_s;
+  result.yaw.angle_error_rad = target.yaw - f.yaw.angle_rad;
+  result.pitch.target_angle_rad = target.pitch;
+  result.pitch.target_speed_rad_s = target.pitch_vel;
+  result.pitch.target_acceleration_rad_s2 = target.pitch_acc;
+  result.pitch.actual_angle_rad = f.pitch.angle_rad;
   result.pitch.actual_speed_rad_s = f.pitch.speed_rad_s;
+  result.pitch.angle_error_rad = target.pitch - f.pitch.angle_rad;
+
   if (run && result.configuration_ready && result.feedback_fresh && target_valid &&
       std::isfinite(dt) && dt > 0.0f &&
       dt <= control_constants::FOLLOW_MAX_STEP_MS * 0.001f) {
-    result.yaw = update_axis(yaw_state, control_constants::FOLLOW_YAW,
-                             target.yaw, target.yaw_vel, f.yaw, dt);
-    result.pitch = update_axis(pitch_state, control_constants::FOLLOW_PITCH,
-                               target.pitch, target.pitch_vel, f.pitch, dt);
-    result.active = finite_output(result.yaw) && finite_output(result.pitch);
+    if (control_constants::FOLLOW_CONSTANT_TORQUE_TEST) {
+      // 恒力矩台架测试：不走任何闭环，只给固定力矩（用于测静摩擦和确认转向）
+      reset_axis(yaw_state);
+      reset_axis(pitch_state);
+      result.yaw.control_output =
+        clamp(control_constants::FOLLOW_TEST_TORQUE_NM, -control_constants::FOLLOW_YAW.max_output,
+              control_constants::FOLLOW_YAW.max_output);
+      result.yaw.speed_command_rad_s = 0.0f;
+      result.active = true;
+    } else {
+      result.yaw =
+        update_axis(yaw_state, control_constants::FOLLOW_YAW, f.yaw, target.yaw, target.yaw_vel,
+                    target.yaw_acc, dt);
+      if (!control_constants::FOLLOW_SINGLE_YAW)
+        result.pitch = update_axis(
+          pitch_state, control_constants::FOLLOW_PITCH, f.pitch, target.pitch, target.pitch_vel,
+          target.pitch_acc, dt);
+      result.active = finite_output(result.yaw) &&
+        (control_constants::FOLLOW_SINGLE_YAW || finite_output(result.pitch));
+    }
   }
   if (!result.active) {
-    yaw_state = {};
-    pitch_state = {};
+    reset_axis(yaw_state);
+    reset_axis(pitch_state);
     result.yaw.control_output = 0.0f;
     result.pitch.control_output = 0.0f;
     result.yaw.speed_command_rad_s = 0.0f;
@@ -174,26 +298,232 @@ void set_enabled(bool value)
 {
   taskENTER_CRITICAL();
   enabled = value;
+  if (value) fault_code = FAULT_NONE;
+  if (!value) {
+    command_active = false;
+    requested_yaw_torque = 0.0f;
+    requested_pitch_torque = 0.0f;
+  }
   taskEXIT_CRITICAL();
+}
+
+bool request_initial_pose_capture()
+{
+  taskENTER_CRITICAL();
+  const bool accepted = !enabled;
+  if (accepted) capture_requested = true;
+  taskEXIT_CRITICAL();
+  return accepted;
+}
+
+bool receive_can1(const CAN_RxHeaderTypeDef & header, uint8_t * bytes, uint32_t stamp_ms)
+{
+  if (!bytes || header.IDE != CAN_ID_STD || header.RTR != CAN_RTR_DATA || header.DLC != 8)
+    return false;
+  if (header.StdId == yaw_motor.rx_id) {
+    yaw_motor.read(bytes, stamp_ms);
+    yaw_stamp = stamp_ms;
+    ++transport.yaw_frames;
+    return true;
+  }
+  if (header.StdId == pitch_motor.rx_id) {
+    pitch_motor.read(bytes, stamp_ms);
+    pitch_stamp = stamp_ms;
+    ++transport.pitch_frames;
+    return true;
+  }
+  return false;
+}
+
+TransportStatus read_transport()
+{
+  taskENTER_CRITICAL();
+  const TransportStatus value = transport;
+  taskEXIT_CRITICAL();
+  return value;
+}
+
+void transmit_can1(uint32_t now_ms, bool permitted)
+{
+  // 电流帧周期 = 执行器采样周期，见文件头注释。这里是"必要不充分"的频率控制：
+  // 只有真正发出新帧，电机才会更新力矩。
+  if (sent_once && (now_ms - last_tx_ms) < control_constants::FOLLOW_CAN_TX_INTERVAL_MS) return;
+  float yaw_torque;
+  float pitch_torque;
+  taskENTER_CRITICAL();
+  const bool live = permitted && command_active &&
+    (now_ms - command_stamp) < control_constants::FOLLOW_COMMAND_TIMEOUT_MS;
+  yaw_torque = live ? requested_yaw_torque : 0.0f;
+  pitch_torque = live ? requested_pitch_torque : 0.0f;
+  taskEXIT_CRITICAL();
+  uint8_t bytes[8] = {};  // 0x1FE 的 4 个 16 位槽位：yaw 占 1-2、pitch 占 3-4，其余补 0
+  yaw_motor.cmd(yaw_torque);
+  pitch_motor.cmd(pitch_torque);
+  yaw_motor.write(bytes);
+  pitch_motor.write(bytes);
+  if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0) {
+    ++transport.tx_busy;
+    return;  // 邮箱满就下次再发，绝不阻塞底盘控制
+  }
+  CAN_TxHeaderTypeDef header = {};
+  header.StdId = yaw_motor.tx_id;  // 两台电机同在 0x1FE 电流帧
+  header.IDE = CAN_ID_STD;
+  header.RTR = CAN_RTR_DATA;
+  header.DLC = 8;
+  uint32_t mailbox = 0;
+  if (HAL_CAN_AddTxMessage(&hcan1, &header, bytes, &mailbox) == HAL_OK) {
+    last_tx_ms = now_ms;
+    sent_once = true;
+    ++transport.tx_frames;
+  } else {
+    ++transport.tx_errors;
+  }
 }
 
 void run()
 {
   TickType_t wake = xTaskGetTickCount();
   TickType_t previous = wake;
+  uint32_t trajectory_start_ms = 0;
+  bool tracking = false;
+  bool overspeed_latched = false;
+  uint32_t yaw_error_ms = 0;
+  uint32_t pitch_error_ms = 0;
+  const TrajectoryPoint initial = trajectory_sample_at_ms(0);
+  constexpr uint32_t stretch = control_constants::FOLLOW_TRAJECTORY_TIME_SCALE;
+  const uint32_t scaled_period_ms = TRAJECTORY_PERIOD_MS * stretch;
+
   for (;;) {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(control_constants::FOLLOW_PERIOD_MS));
-    const TickType_t now = xTaskGetTickCount();
-    const TickType_t delta = now - previous;
-    previous = now;
+
+    // CAN 中断在更新电机状态，这里取一个短临界区的快照
     taskENTER_CRITICAL();
-    const Feedback current = feedback;
-    const bool run_requested = enabled;
+    const uint32_t now = xTaskGetTickCount();
+    const float raw_yaw = yaw_motor.angle;
+    const float raw_pitch = pitch_motor.angle;
+    const float yaw_speed = yaw_motor.speed;
+    const float pitch_speed = pitch_motor.speed;
+    const uint32_t ys = yaw_stamp;
+    const uint32_t ps = pitch_stamp;
+    const bool motors_live = yaw_motor.is_alive(now) &&
+      (control_constants::FOLLOW_SINGLE_YAW || pitch_motor.is_alive(now));
+    bool run_requested = enabled;
+    const bool recapture = capture_requested && !run_requested;
+    const bool rc_stop = control_constants::FOLLOW_USE_RC_STOP && g_data.sw_r == 0;
     taskEXIT_CRITICAL();
-    const TrajectoryPoint target = trajectory_read();
-    step(target, current, run_requested, now, static_cast<float>(delta) * 0.001f);
-    // After an excessive scheduling delay, skip catch-up iterations.
-    if (delta > control_constants::FOLLOW_MAX_STEP_MS) wake = now;
+
+    const uint32_t delta = now - previous;
+    if (delta == 0U) {  // 同一 tick 内被再次唤醒：没有新的控制步进，保持上一条指令
+      wake = now;
+      continue;
+    }
+    previous = now;
+    const float dt = static_cast<float>(delta) * 0.001f;
+
+    // 起点对齐：解锁瞬间把"当前姿态"映射成轨迹第一点
+    if (motors_live && (recapture || (!initial_pose_captured && startup_capture_allowed))) {
+      yaw_origin = raw_yaw;
+      pitch_origin = raw_pitch;
+      initial_pose_captured = true;
+      startup_capture_allowed = false;
+      tracking = false;
+      reset_axis(yaw_state);
+      reset_axis(pitch_state);
+      taskENTER_CRITICAL();
+      capture_requested = false;
+      taskEXIT_CRITICAL();
+    }
+    // 反馈丢失：关节参考失效，必须重新解锁并重新对齐
+    if (!motors_live && initial_pose_captured) {
+      initial_pose_captured = false;
+      set_enabled(false);
+      latch_fault(FAULT_FEEDBACK);
+    }
+    if (rc_stop && tracking) {
+      set_enabled(false);
+      latch_fault(FAULT_NONE);
+    }
+    const bool timing_ok = delta <= control_constants::FOLLOW_MAX_STEP_MS;
+    if (!timing_ok && tracking) {
+      set_enabled(false);
+      latch_fault(FAULT_TIMING);
+    }
+    // 恒力矩台架测试的超速保护
+    if (control_constants::FOLLOW_CONSTANT_TORQUE_TEST && motors_live &&
+        std::fabs(yaw_speed) >= control_constants::FOLLOW_TEST_TRIP_SPEED_RAD_S)
+      overspeed_latched = true;
+    if (overspeed_latched) {
+      set_enabled(false);
+      latch_fault(FAULT_OVERSPEED);
+    }
+
+    const bool configuration_ready = configured(control_constants::FOLLOW_YAW) &&
+      (control_constants::FOLLOW_SINGLE_YAW || configured(control_constants::FOLLOW_PITCH));
+    if (!configuration_ready) latch_fault(FAULT_CONFIG);
+    const bool run_now = enabled && initial_pose_captured && motors_live && configuration_ready &&
+                         !rc_stop && timing_ok && !overspeed_latched;
+    if (run_now && !tracking) {
+      trajectory_start_ms = now;
+      reset_axis(yaw_state);
+      reset_axis(pitch_state);
+      yaw_error_ms = 0;
+      pitch_error_ms = 0;
+    }
+    tracking = run_now;
+
+    // 轨迹相位：按时间缩放缓放
+    const uint32_t phase = tracking ? (now - trajectory_start_ms) % scaled_period_ms
+                                    : now % scaled_period_ms;
+    TrajectoryPoint target = trajectory_sample_at_ms(phase / stretch);
+    target.yaw_vel /= stretch;
+    target.pitch_vel /= stretch;
+    target.yaw_acc /= static_cast<float>(stretch) * stretch;
+    target.pitch_acc /= static_cast<float>(stretch) * stretch;
+
+    // 反馈换到"轨迹坐标系"：参考第一点 = 解锁时的实际姿态
+    const Feedback current = {
+      {initial.yaw + control_constants::FOLLOW_YAW_DIRECTION * (raw_yaw - yaw_origin),
+       control_constants::FOLLOW_YAW_DIRECTION * yaw_speed, ys,
+       motors_live && initial_pose_captured},
+      {initial.pitch + control_constants::FOLLOW_PITCH_DIRECTION * (raw_pitch - pitch_origin),
+       control_constants::FOLLOW_PITCH_DIRECTION * pitch_speed, ps,
+       motors_live && initial_pose_captured}};
+    set_feedback(current);
+    step(target, current, tracking, now, dt, phase, rc_stop);
+
+    // 跟踪误差保护：参考与实际偏差过大且持续，就停机锁存，避免越追越飞
+    if (tracking) {
+      const Result state = read();
+      yaw_error_ms = std::fabs(state.yaw.angle_error_rad) >
+                         control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD
+                       ? yaw_error_ms + delta
+                       : 0U;
+      pitch_error_ms = (!control_constants::FOLLOW_SINGLE_YAW &&
+                        std::fabs(state.pitch.angle_error_rad) >
+                          control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD)
+                         ? pitch_error_ms + delta
+                         : 0U;
+      if (yaw_error_ms >= control_constants::FOLLOW_TRACKING_ERROR_MS ||
+          pitch_error_ms >= control_constants::FOLLOW_TRACKING_ERROR_MS) {
+        set_enabled(false);
+        latch_fault(FAULT_TRACKING_ERROR);
+        tracking = false;
+      }
+    }
+
+    taskENTER_CRITICAL();
+    const bool allowed = latest.active && enabled;
+    requested_yaw_torque =
+      allowed ? latest.yaw.control_output * control_constants::FOLLOW_YAW_DIRECTION : 0.0f;
+    requested_pitch_torque = allowed && !control_constants::FOLLOW_SINGLE_YAW
+                               ? latest.pitch.control_output *
+                                   control_constants::FOLLOW_PITCH_DIRECTION
+                               : 0.0f;
+    command_stamp = now;
+    command_active = allowed;
+    taskEXIT_CRITICAL();
+
+    if (!timing_ok) wake = now;
   }
 }
 }  // namespace trajectory_follow
