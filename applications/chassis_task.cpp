@@ -1,15 +1,14 @@
-#include "cmsis_os.h"
 #include "FreeRTOS.h"
-#include "task.h"
-#include "power_model.hpp"
-#include "power_meter.hpp"
+#include "cmsis_os.h"
+#include "control_constants.hpp"
 #include "io/can/can.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
+#include "power_meter.hpp"
+#include "power_model.hpp"
 #include "shared_data.hpp"
+#include "task.h"
 #include "tools/pid/pid.hpp"
 #include "trajectory_follow.hpp"
-#include "control_constants.hpp"
-
 
 namespace
 {
@@ -17,7 +16,7 @@ constexpr float WHEEL_RADIUS_M = 0.077f;
 
 // ������������ֹ����
 constexpr float MAX_LINEAR_SPEED = 0.8f;
-constexpr float MAX_ANGULAR_SPEED = 0.8f;
+constexpr float MAX_ANGULAR_SPEED = 5.0f;
 constexpr float GEAR_RATIO = 14.9f;
 constexpr float MAX_TORQUE = 0.8f;
 constexpr float DEADZONE = 0.05f;
@@ -58,12 +57,11 @@ float update_power_prediction(float fl, float fr, float rl, float rr)
 {
   const uint32_t now = osKernelSysTick();
   taskENTER_CRITICAL();
-  const bool valid = motor_fl.is_alive(now) && motor_fr.is_alive(now) &&
-                     motor_rl.is_alive(now) && motor_rr.is_alive(now);
+  const bool valid = motor_fl.is_alive(now) && motor_fr.is_alive(now) && motor_rl.is_alive(now) &&
+                     motor_rr.is_alive(now);
   // Torque and speed use the same physical motor-output direction convention.
   const chassis_power::MotorState motors[chassis_power::MOTOR_COUNT] = {
-    {fl, motor_fl.speed}, {fr, motor_fr.speed},
-    {rl, motor_rl.speed}, {rr, motor_rr.speed}};
+    {fl, motor_fl.speed}, {fr, motor_fr.speed}, {rl, motor_rl.speed}, {rr, motor_rr.speed}};
   taskEXIT_CRITICAL();
   chassis_power::g_limit_result = chassis_power::limit(motors, valid);
   chassis_power::g_prediction = chassis_power::g_limit_result.before;
@@ -142,7 +140,8 @@ extern "C" void chassis_task()
     motor_rl.write(can1.tx_data);
     motor_rr.write(can1.tx_data);
     can1.send(motor_fl.tx_id);
-    trajectory_follow::transmit_can1(osKernelSysTick(), !control_constants::FOLLOW_USE_RC_STOP || g_data.sw_r != 0);
+    trajectory_follow::transmit_can1(
+      osKernelSysTick(), !control_constants::FOLLOW_USE_RC_STOP || g_data.sw_r != 0);
   }
 }
 
@@ -160,8 +159,7 @@ void receive_can_fifo(CAN_HandleTypeDef * hcan, uint32_t fifo)
     if (hcan != &hcan1) continue;
     can1.frame_type = (header.IDE == CAN_ID_EXT);
     can1.rx_id = can1.frame_type ? header.ExtId : header.StdId;
-    if (header.IDE != CAN_ID_STD || header.RTR != CAN_RTR_DATA || header.DLC != 8)
-      continue;
+    if (header.IDE != CAN_ID_STD || header.RTR != CAN_RTR_DATA || header.DLC != 8) continue;
     for (unsigned i = 0; i < 8; ++i) can1.rx_data[i] = data[i];
     const uint32_t stamp_ms = osKernelSysTick();
     if (header.StdId == power_meter::FEEDBACK_ID)

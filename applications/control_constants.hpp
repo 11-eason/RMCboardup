@@ -4,7 +4,7 @@
 namespace control_constants
 {
 // GY-56 receive test: physical 3-pin UART1 = USART6.
-constexpr bool INFRARED_PLOT_TEST = true;
+constexpr bool INFRARED_PLOT_TEST = false;
 constexpr bool INFRARED_PLOT_RAW_FIELDS = true;  // 8 channels; false restores 4.
 constexpr unsigned INFRARED_UART_BAUD = 115200U;  // Set 115200 if module was configured so.
 constexpr bool INFRARED_AUTO_BAUD = true;
@@ -159,7 +159,7 @@ constexpr float FOLLOW_D_FILTER_S = 0.05f;
 
 // ---- 绘图 ----
 // 0 = 底盘功率，1 = 跟随曲线（4 通道：两轴的目标/实际），2 = 原始参考
-constexpr unsigned FOLLOW_PLOT_MODE = 1U;
+constexpr unsigned FOLLOW_PLOT_MODE = 0U;
 
 static_assert(
   FOLLOW_YAW_MOTOR_ID >= 1U && FOLLOW_YAW_MOTOR_ID <= 4U && FOLLOW_PITCH_MOTOR_ID >= 1U &&

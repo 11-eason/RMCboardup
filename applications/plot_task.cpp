@@ -1,5 +1,7 @@
 #include <limits>
 #include "cmsis_os.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include "control_constants.hpp"
 #include "infrared_status.hpp"
 #include "io/plotter/plotter.hpp"
@@ -10,7 +12,8 @@
 #include "usart.h"
 
 // USART1 / physical 4-pin UART2: AA BB + byte length + little-endian floats.
-// Infrared test: distance cm, validity, bytes/20ms, valid frames/20ms.
+// Power mode (default): measured W, predicted W after torque limiting; 2 floats.
+// Infrared mode, when explicitly enabled: distance and reception diagnostics.
 // Other plot modes below are inactive while INFRARED_PLOT_TEST is true.
 
 sp::Plotter plotter(&huart1, false);
@@ -47,7 +50,13 @@ extern "C" void plot_task()
       // 恒力矩测试：只看实际转速和输出力矩，用来判断静摩擦与转向
       plotter.plot(state.yaw.actual_speed_rad_s, state.yaw.control_output);
     } else if (control_constants::FOLLOW_PLOT_MODE == 0U) {
-      plotter.plot(power_meter::snapshot().power_w, chassis_power::g_limit_result.after.total_w);
+      const auto meter = power_meter::snapshot();
+      // Chassis task updates the prediction at 1 kHz; copy before UART transmit.
+      taskENTER_CRITICAL();
+      const float predicted_w = chassis_power::g_limit_result.after.total_w;
+      taskEXIT_CRITICAL();
+      // Channel 1: measured W; channel 2: model W for the limited output command.
+      plotter.plot(meter.power_w, predicted_w);
     } else if (control_constants::FOLLOW_PLOT_MODE == 2U) {
       const TrajectoryPoint target = trajectory_read();
       plotter.plot(target.yaw, target.pitch);
