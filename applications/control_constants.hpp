@@ -5,7 +5,7 @@ namespace control_constants
 {
 // GY-56 receive test: physical 3-pin UART1 = USART6.
 constexpr bool INFRARED_PLOT_TEST = false;
-constexpr bool INFRARED_PLOT_RAW_FIELDS = true;  // 8 channels; false restores 4.
+constexpr bool INFRARED_PLOT_RAW_FIELDS = true;   // 8 channels; false restores 4.
 constexpr unsigned INFRARED_UART_BAUD = 115200U;  // Set 115200 if module was configured so.
 constexpr bool INFRARED_AUTO_BAUD = true;
 constexpr unsigned INFRARED_BAUD_PROBE_MS = 2000U;
@@ -25,20 +25,94 @@ static_assert(INFRARED_RAW_TO_CM > 0.0f, "Invalid distance unit conversion");
 // Initial tuning values only; NOT calibrated for this chassis.
 // Torque: gearbox output shaft N*m; speed: same shaft rad/s.
 // Refit K1/K2 if the shaft convention or actual gear ratio changes.
-constexpr float POWER_K1 = 1.98f;   // W / (N*m)^2
+// K1 是铜损系数；按参考文档它还承担"加减速阶段由加速度引起的额外能耗"。
+// 【2026-10 标定尝试记录】用 data_1（1291 采样，扣除 7.4% 刹车/再生）最小二乘得
+//   K1 = 3.97, K2 ≈ 0, K3 = 4.82，残差 ±1.49 W、R² = 0.981。
+//   但该批数据最高只到 62 W，76~80 W 属于外推 → 实机表现反而比下面这组经验值差，
+//   所以暂时回到"经验值 + 8 W 裕量"的方案。
+//   若要让标定真正生效：把 CHASSIS_POWER_LIMIT_W 临时设 200、绘图模式设 4，
+//   录一段真正跑到 90~100 W 的数据重新拟合，再用 3~4 W 裕量。
+// K2 must be calibrated in the actual shaft-speed coordinates.
+// Rotor-to-output conversion multiplies the speed-squared coefficient by ratio^2.
+constexpr float POWER_K1 = 2.03f;   // W / (N*m)^2（经验值，实测表现优于 3.97）
 constexpr float POWER_K2 = 0.009f;  // W / (rad/s)^2
-constexpr float POWER_K3 = 4.0f;    // W, TOTAL chassis idle loss; measure before calibration.
+constexpr float POWER_K3 = 4.1f;    // W, 整机空载损耗
+
+// ---- 峰值修正（直接对实测功率做快速削弱）----
+// 模型永远有误差，而"实测超过限幅"是确定的。这里按实测超限量立刻再打一折：
+//   k = 1 − KP × (P实测 − 允许) / 允许,  限幅在 [MIN, 1]
+// 超 10 W（允许 78）时 k≈0.87，超 20 W 时 k≈0.74，能把尖峰压回去。
+// 因为闭环建立在"功率计读数"上，KP 太大会跟着测量延迟来回摆，调小即可。
+constexpr float POWER_PEAK_KP = 0.0f;   // 0 = 关闭。实测：开启后与限幅环打架，抖动变大
+constexpr float POWER_PEAK_MIN = 0.6f;  // 最多再削到 60%
+static_assert(
+  POWER_PEAK_KP >= 0.0f && POWER_PEAK_MIN > 0.0f && POWER_PEAK_MIN <= 1.0f,
+  "Invalid peak correction gains");
 constexpr bool POWER_MODEL_CALIBRATED = false;
 
 constexpr float CHASSIS_POWER_LIMIT_W = 80.0f;
-// Optional reserved margin; effective limit = limit - margin.
-constexpr float POWER_LIMIT_MARGIN_W = 3.0f;
+// 名义裕量：允许功率 = (LIMIT - MARGIN) × bias。
+// 标定后模型误差只有 ±1.5 W（最大 6.5 W），所以裕量可以从 8 W 降回 4 W：
+//   限幅点 76 W，均值贴 76，峰值约 80~82。
+// 想更激进用 3；想更保守用 5~6。
+constexpr float POWER_LIMIT_MARGIN_W = 2.0f;
 static_assert(CHASSIS_POWER_LIMIT_W > 0.0f, "Power limit must be positive");
 static_assert(
   POWER_LIMIT_MARGIN_W >= 0.0f && POWER_LIMIT_MARGIN_W < CHASSIS_POWER_LIMIT_W,
   "Invalid power margin");
 constexpr unsigned POWER_LIMIT_SEARCH_STEPS = 24;
 static_assert(POWER_LIMIT_SEARCH_STEPS > 0, "Search needs at least one step");
+
+// ---- 实测功率慢速修正（路径 B）----
+// 用功率计实测值修正允许功率，使**实测均值**收敛到限幅点。
+// 关键：先对实测功率做低通（看均值），否则峰值一超就降额，会把功率压得很低。
+// DOWN：实测均值每超限 1 W，系数每毫秒减小多少（10 W 误差约 0.2 s 响应）
+constexpr float POWER_BIAS_DOWN_PER_W = 5e-5f;
+// UP：解除过度降额/抬高允许值的速率（10 W 偏差约 0.5 s 响应）
+constexpr float POWER_BIAS_UP_PER_W = 4e-5f;
+// Slow correction can lower the budget and recover to nominal, never above nominal.
+constexpr float POWER_BIAS_MIN = 0.6f;
+constexpr float POWER_BIAS_MAX = 1.0f;  // Never raise the model budget above limit - margin.
+// 实测均值低于限幅多少瓦以上才开始上调
+constexpr float POWER_BIAS_RECOVER_BAND_W = 0.5f;
+// 实测功率低通时间常数（s）：它决定 bias 盯的是"均值"还是"峰值"
+constexpr float POWER_BIAS_FILTER_S = 0.3f;
+// Keep existing gains in their nominal-1ms units; scale by actual meter interval.
+constexpr float POWER_BIAS_MAX_STEP = 0.01f;  // Bound a single new-frame update.
+static_assert(
+  POWER_BIAS_MAX_STEP > 0.0f && POWER_BIAS_MAX_STEP <= 0.05f,
+  "Invalid measured-power feedback step");
+
+// ---- 加速瞬间的前瞻预留（抑制功率超调）----
+// 限幅器改的是指令力矩，而真实功率是"力矩×转速"的物理结果：加速瞬间四轮同时提速，
+// 机械功率陡增，会出现 100 ms 级的超调（实测 78 W 均值下峰值冲到 100~110 W）。
+// 做法：期望功率上升越快，越提前压低允许值。
+//   预留量 = 期望功率上升速率(W/s) × POWER_RESERVE_LEAD_S，上限 POWER_RESERVE_MAX_W
+// 代价：加速略缓。LEAD 设 0 即关闭该功能。
+constexpr float POWER_RESERVE_LEAD_S = 0.02f;  // 前瞻预留（实测有效，保留）
+constexpr float POWER_RESERVE_MAX_W = 8.0f;    // 最多预留 15 W
+static_assert(POWER_RESERVE_LEAD_S >= 0.0f && POWER_RESERVE_MAX_W >= 0.0f, "Invalid reserve");
+// 功率计多久没更新就视为无效（不再参与修正）
+constexpr unsigned POWER_METER_TIMEOUT_MS = 200U;
+
+// Fast measured-power trend guard, separate from the original prediction formula.
+constexpr float POWER_TREND_LEAD_S = 0.05f;    // Forecast horizon.
+constexpr float POWER_TREND_FILTER_S = 0.04f;  // Filter power slope only.
+constexpr float POWER_TREND_RECOVER_PER_S =
+  2.0f;  // Recovery rate: up to two scale units per second.
+constexpr float POWER_TREND_RECOVER_BAND_W = 0.25f;
+static_assert(
+  POWER_TREND_LEAD_S >= 0.0f && POWER_TREND_LEAD_S <= 0.5f, "Invalid power forecast horizon");
+static_assert(
+  POWER_TREND_FILTER_S > 0.0f && POWER_TREND_RECOVER_PER_S > 0.0f &&
+    POWER_TREND_RECOVER_BAND_W >= 0.0f,
+  "Invalid power trend guard parameters");
+
+static_assert(
+  POWER_BIAS_MIN > 0.0f && POWER_BIAS_MIN <= POWER_BIAS_MAX, "Invalid power bias range");
+static_assert(
+  POWER_BIAS_DOWN_PER_W > 0.0f && POWER_BIAS_UP_PER_W >= 0.0f && POWER_BIAS_RECOVER_BAND_W >= 0.0f,
+  "Invalid power bias gains");
 
 // =====================================================================
 // ===== 云台轨迹跟随 =====
@@ -158,7 +232,9 @@ constexpr bool FOLLOW_PITCH_CONFIGURED = true;
 constexpr float FOLLOW_D_FILTER_S = 0.05f;
 
 // ---- 绘图 ----
-// 0 = 底盘功率，1 = 跟随曲线（4 通道：两轴的目标/实际），2 = 原始参考
+// 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（4 通道：两轴的目标/实际），
+// 2 = 原始参考，3 = 底盘诊断（FL 目标速度 / 实际速度 / 力矩 / 静止释放标志），
+// 4 = 功率模型标定（Στω / Στ²×100 / Σω²÷20 / 实测功率）
 constexpr unsigned FOLLOW_PLOT_MODE = 0U;
 
 static_assert(
@@ -176,7 +252,7 @@ static_assert(
 static_assert(
   FOLLOW_TRAJECTORY_TIME_SCALE > 0U && FOLLOW_TRAJECTORY_TIME_SCALE <= 100U,
   "Invalid trajectory time scale");
-static_assert(FOLLOW_PLOT_MODE <= 2U, "Invalid plot mode");
+static_assert(FOLLOW_PLOT_MODE <= 4U, "Invalid plot mode");
 static_assert(
   FOLLOW_MAX_TRACKING_ERROR_RAD > 0.0f && FOLLOW_OVERSPEED_FACTOR > 1.0f,
   "Protection thresholds must be positive and above 1");

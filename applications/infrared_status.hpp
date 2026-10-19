@@ -1,8 +1,10 @@
 #ifndef INFRARED_STATUS_HPP
 #define INFRARED_STATUS_HPP
 #include <cstdint>
-namespace infrared {
-struct Status {
+namespace infrared
+{
+struct Status
+{
   float distance_cm;
   uint32_t received_bytes;
   uint32_t valid_frames;
@@ -18,5 +20,5 @@ struct Status {
   uint8_t payload_byte3;
 };
 Status snapshot();
-}
+}  // namespace infrared
 #endif

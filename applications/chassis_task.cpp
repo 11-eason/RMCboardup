@@ -1,3 +1,4 @@
+#include <cmath>
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
 #include "control_constants.hpp"
@@ -34,7 +35,41 @@ constexpr float DIR_OMEGA = 1.0f;
 constexpr float DIR_M_FL = 1.0f;   // 1
 constexpr float DIR_M_FR = -1.0f;  // 2
 constexpr float DIR_M_RL = -1.0f;  // 3
-constexpr float DIR_M_RR = 1.0f;   // 4
+constexpr float DIR_M_RR = 1.0f;  // 4
+
+// ---- 速度环整定（2026-10 修改）----
+// Kp 由 2.0 降到 1.0：按 τ = J/Kp 估算，2.0 时约 2 ms，只有 2 个执行器周期(1 ms)，
+// 属于边缘偏高，典型表现就是"静止时嗡嗡响、跑起来听不出来"。
+constexpr float SPEED_KP = 1.0f;
+// 零速释放：目标与实际速度都很小时直接输出 0，让轮子自由滑停。
+// 原来的做法是松手后目标变 0、PID 继续以满力矩把实际转速往 0 拽，
+// 刹过头再反向，于是在零速附近来回抽 → 嗡嗡响且电机发热。
+constexpr float HOLD_SPEED_RAD_S = 0.5f;  // 轮子（输出轴）角速度死区，约 3.9 cm/s
+// 输出死区：残余力矩小于它就当 0，避免电机轻轻"哼"
+constexpr float OUTPUT_DEADBAND_NM = 0.02f;
+
+float diag_target[4];
+float diag_actual[4];
+float diag_out[4];
+float diag_released[4];
+
+// 单轮速度环：带零速释放与输出死区。index 仅用于诊断快照。
+float wheel_output(int index, sp::PID & pid, float target, float actual)
+{
+  const bool idle = std::fabs(target) < HOLD_SPEED_RAD_S && std::fabs(actual) < HOLD_SPEED_RAD_S;
+  diag_target[index] = target;
+  diag_actual[index] = actual;
+  diag_released[index] = idle ? 1.0f : 0.0f;
+  float out = 0.0f;
+  if (idle) {
+    pid.clear();  // 清历史状态，避免下次起步带着旧值
+  } else {
+    pid.calc(target, actual);
+    out = std::fabs(pid.out) < OUTPUT_DEADBAND_NM ? 0.0f : pid.out;
+  }
+  diag_out[index] = out;
+  return out;
+}
 
 }  // namespace
 
@@ -46,10 +81,21 @@ sp::RM_Motor motor_fr(2, sp::RM_Motors::M3508, GEAR_RATIO);
 sp::RM_Motor motor_rl(3, sp::RM_Motors::M3508, GEAR_RATIO);
 sp::RM_Motor motor_rr(4, sp::RM_Motors::M3508, GEAR_RATIO);
 
-sp::PID pid_fl(1e-3f, 2.0f, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
-sp::PID pid_fr(1e-3f, 2.0f, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
-sp::PID pid_rl(1e-3f, 2.0f, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
-sp::PID pid_rr(1e-3f, 2.0f, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
+sp::PID pid_fl(1e-3f, SPEED_KP, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
+sp::PID pid_fr(1e-3f, SPEED_KP, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
+sp::PID pid_rl(1e-3f, SPEED_KP, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
+sp::PID pid_rr(1e-3f, SPEED_KP, 0.0f, 0.0f, MAX_TORQUE, 0.0f, 1.0f, false, false);
+
+// 供绘图使用的底盘诊断快照（只读）：0=FL 1=FR 2=RL 3=RR
+extern "C" void chassis_diag(float * target, float * actual, float * out, float * released)
+{
+  for (int i = 0; i < 4; ++i) {
+    target[i] = diag_target[i];
+    actual[i] = diag_actual[i];
+    out[i] = diag_out[i];
+    released[i] = diag_released[i];
+  }
+}
 
 namespace
 {
@@ -63,7 +109,13 @@ float update_power_prediction(float fl, float fr, float rl, float rr)
   const chassis_power::MotorState motors[chassis_power::MOTOR_COUNT] = {
     {fl, motor_fl.speed}, {fr, motor_fr.speed}, {rl, motor_rl.speed}, {rr, motor_rr.speed}};
   taskEXIT_CRITICAL();
-  chassis_power::g_limit_result = chassis_power::limit(motors, valid);
+  // 路径 B：把功率计实测值送进限幅器，用慢速修正吸收模型误差
+  const auto meter = power_meter::snapshot();
+  const bool meter_ok = power_meter::is_alive(now, control_constants::POWER_METER_TIMEOUT_MS) &&
+                        std::isfinite(meter.power_w) && meter.power_w >= 0.0f;
+  chassis_power::g_limit_result =
+    chassis_power::limit(motors, valid, meter.power_w, meter_ok,
+                         meter.last_rx_ms, meter.received_frames, now);
   chassis_power::g_prediction = chassis_power::g_limit_result.before;
   return chassis_power::g_limit_result.torque_scale;
 }
@@ -71,6 +123,15 @@ float update_power_prediction(float fl, float fr, float rl, float rr)
 void set_all_zero()
 {
   update_power_prediction(0.0f, 0.0f, 0.0f, 0.0f);
+  // 清 PID 历史，避免下次起步带着旧状态
+  pid_fl.clear();
+  pid_fr.clear();
+  pid_rl.clear();
+  pid_rr.clear();
+  for (int i = 0; i < 4; ++i) {
+    diag_released[i] = 1.0f;
+    diag_out[i] = 0.0f;
+  }
   motor_fl.cmd(0.0f);
   motor_fr.cmd(0.0f);
   motor_rl.cmd(0.0f);
@@ -84,15 +145,11 @@ void drive_with(float vx, float vy, float omega)
   float v_3 = (vx + vy + omega) / WHEEL_RADIUS_M;
   float v_4 = (vx - vy - omega) / WHEEL_RADIUS_M;
 
-  pid_fl.calc(v_1, motor_fl.speed * DIR_M_FL);
-  pid_fr.calc(v_2, motor_fr.speed * DIR_M_FR);
-  pid_rl.calc(v_3, motor_rl.speed * DIR_M_RL);
-  pid_rr.calc(v_4, motor_rr.speed * DIR_M_RR);
-
-  const float fl = pid_fl.out * DIR_M_FL;
-  const float fr = pid_fr.out * DIR_M_FR;
-  const float rl = pid_rl.out * DIR_M_RL;
-  const float rr = pid_rr.out * DIR_M_RR;
+  // 带零速释放与输出死区的速度环（见 wheel_output 注释）
+  const float fl = wheel_output(0, pid_fl, v_1, motor_fl.speed * DIR_M_FL) * DIR_M_FL;
+  const float fr = wheel_output(1, pid_fr, v_2, motor_fr.speed * DIR_M_FR) * DIR_M_FR;
+  const float rl = wheel_output(2, pid_rl, v_3, motor_rl.speed * DIR_M_RL) * DIR_M_RL;
+  const float rr = wheel_output(3, pid_rr, v_4, motor_rr.speed * DIR_M_RR) * DIR_M_RR;
   const float power_scale = update_power_prediction(fl, fr, rl, rr);
   motor_fl.cmd(power_scale * fl);
   motor_fr.cmd(power_scale * fr);
