@@ -4,7 +4,7 @@
 namespace control_constants
 {
 // GY-56 receive test: physical 3-pin UART1 = USART6.
-constexpr bool INFRARED_PLOT_TEST = true;
+constexpr bool INFRARED_PLOT_TEST = false;
 constexpr bool INFRARED_PLOT_RAW_FIELDS = true;   // 8 channels; false restores 4.
 constexpr unsigned INFRARED_UART_BAUD = 115200U;  // Set 115200 if module was configured so.
 constexpr bool INFRARED_AUTO_BAUD = true;
@@ -103,7 +103,7 @@ static_assert(
 // 当前硬件是 ID 2 和 4，所以这里按 2/4 配置。若要把两台电机统一改成 1 和 2：
 // 改拨码后，把下面两个数字改成 1 和 2 重烧。
 // CAN 滤波器是"全通"（掩码全 0），任何 ID 都能收到，不需要改滤波配置。
-constexpr unsigned FOLLOW_YAW_MOTOR_ID = 1U;
+constexpr unsigned FOLLOW_YAW_MOTOR_ID = 4U;
 constexpr unsigned FOLLOW_PITCH_MOTOR_ID = 2U;
 constexpr float FOLLOW_YAW_RATIO = 1.0f;
 constexpr float FOLLOW_PITCH_RATIO = 1.0f;
@@ -112,17 +112,19 @@ constexpr float FOLLOW_YAW_DIRECTION = 1.0f;
 constexpr float FOLLOW_PITCH_DIRECTION = 1.0f;
 
 // ---- 运行模式 ----
-constexpr bool FOLLOW_SINGLE_YAW = false;  // 两轴同时跟随；只接一台电机时改 true
+// false = 两轴都跟随（当前测 pitch 需要它，否则 pitch 力矩恒为 0）
+constexpr bool FOLLOW_SINGLE_YAW = false;
 // 恒力矩台架测试：不做闭环，只输出固定力矩（测静摩擦、确认转向）。测完必须改回 false。
+// 【方向符号已验证：正力矩 → 实际角度增大，符号正确，DIRECTION 保持 1.0】
 constexpr bool FOLLOW_CONSTANT_TORQUE_TEST = false;
 constexpr float FOLLOW_TEST_TORQUE_NM = 0.12f;
 constexpr float FOLLOW_TEST_TRIP_SPEED_RAD_S = 5.23598776f;  // 50 rpm，超速即锁存停机
 // 机械行程保护：裸电机阶段关闭；装上云台后打开并填真实行程。
 constexpr bool FOLLOW_ENFORCE_ANGLE_LIMITS = false;
 // 时间缩放：1 = 原始 680 ms 周期（最快）；2/4 = 放慢并同时降低速度、加速度。
-constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 1U;
+constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 2U;  // 1360 ms/圈（缩放 4 已验证 OK，提速一档）
 constexpr bool FOLLOW_START_ENABLED =
-  false;  // Sensor bench test: no automatic motor start.              // 上电即开始跟随（台架用）
+  true;  // Start yaw tracking after fresh feedback and pose capture.
 constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE = true;  // 上电自动记录初始姿态
 constexpr bool FOLLOW_USE_RC_STOP = false;               // 用遥控器右拨杆下档急停
 
@@ -170,12 +172,14 @@ constexpr float FOLLOW_BREAKAWAY_SPEED_RAD_S = 0.15f;
 //   而电流帧周期 5 ms 时 τ < 周期 → 采样环必然振荡（之前"震动"的根因）。
 //   积分上限必须 ≥ 静摩擦对应的力矩，否则积分顶不过摩擦。
 //   位置环 Kp：12 → 15 用于压缩高速段的"切角"滞后。
-constexpr float FOLLOW_YAW_ANGLE_KP = 12.0f;  // (rad/s)/rad（15 会变差，已回退到 12）
-constexpr float FOLLOW_YAW_ANGLE_KI = 0.4f;
-constexpr float FOLLOW_YAW_ANGLE_KD = 0.0f;
-constexpr float FOLLOW_YAW_ANGLE_INTEGRAL_LIMIT = 0.0f;  // rad/s
-constexpr float FOLLOW_YAW_SPEED_KP = 0.015f;            // N·m/(rad/s)
-constexpr float FOLLOW_YAW_SPEED_KI = 0.45f;             // N·m/rad
+constexpr float FOLLOW_YAW_ANGLE_KP = 15.0f;  // (rad/s)/rad【原始周期：带宽需 ≥3×1.47Hz，10 太小】
+constexpr float FOLLOW_YAW_ANGLE_KI = 3.00f;  // 消除峰谷处的静态误差（纯 P 压不掉）
+constexpr float FOLLOW_YAW_ANGLE_KD =
+  0.0f;  // 与前馈(1.0)冲突：KD 必须为 0 或 1.0，中间值会吃掉驱动
+constexpr float FOLLOW_YAW_ANGLE_INTEGRAL_LIMIT =
+  0.30f;                                      // rad/s（积分最多贡献 0.3 rad/s 的速度指令）
+constexpr float FOLLOW_YAW_SPEED_KP = 0.13f;  // N·m/(rad/s)【装云台后：0.015→0.100】
+constexpr float FOLLOW_YAW_SPEED_KI = 0.45f;  // N·m/rad（恢复验证值）
 constexpr float FOLLOW_YAW_SPEED_KD = 0.0f;
 constexpr float FOLLOW_YAW_SPEED_INTEGRAL_LIMIT = 0.25f;  // N·m
 constexpr float FOLLOW_YAW_ANGLE_MIN_RAD = 0.0f;
@@ -186,11 +190,12 @@ constexpr float FOLLOW_YAW_MAX_TORQUE_NM = 0.40f;      // ≈0.54 A
 constexpr float FOLLOW_YAW_VELOCITY_FF = 1.0f;
 constexpr bool FOLLOW_YAW_CONFIGURED = true;
 
-constexpr float FOLLOW_PITCH_ANGLE_KP = 12.15f;  // 与 yaw 同参数（已验证）
-constexpr float FOLLOW_PITCH_ANGLE_KI = 0.0f;
-constexpr float FOLLOW_PITCH_ANGLE_KD = 0.1f;
-constexpr float FOLLOW_PITCH_ANGLE_INTEGRAL_LIMIT = 0.0f;
-constexpr float FOLLOW_PITCH_SPEED_KP = 0.015f;
+// pitch 轴：与 yaw 同步为"装云台"整定值（内环必须加强，否则跟随严重滞后）
+constexpr float FOLLOW_PITCH_ANGLE_KP = 20.0f;  // pitch 惯量小，yaw 的 15 会超调 60%，先降到 6
+constexpr float FOLLOW_PITCH_ANGLE_KI = 2.0f;
+constexpr float FOLLOW_PITCH_ANGLE_KD = 0.0f;
+constexpr float FOLLOW_PITCH_ANGLE_INTEGRAL_LIMIT = 0.30f;
+constexpr float FOLLOW_PITCH_SPEED_KP = 0.080f;  // pitch 惯量小，内环适当降低（yaw 用 0.13）
 constexpr float FOLLOW_PITCH_SPEED_KI = 0.45f;
 constexpr float FOLLOW_PITCH_SPEED_KD = 0.0f;
 constexpr float FOLLOW_PITCH_SPEED_INTEGRAL_LIMIT = 0.25f;
@@ -206,10 +211,13 @@ constexpr bool FOLLOW_PITCH_CONFIGURED = true;
 constexpr float FOLLOW_D_FILTER_S = 0.05f;
 
 // ---- 绘图 ----
-// 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（4 通道：两轴的目标/实际），
+// 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw 2通道，双轴4通道），
 // 2 = 原始参考，3 = 底盘诊断（FL 目标速度 / 实际速度 / 力矩 / 静止释放标志），
 // 4 = 功率模型标定（Στω / Στ²×100 / Σω²÷20 / 实测功率）
-constexpr unsigned FOLLOW_PLOT_MODE = 0U;
+constexpr unsigned FOLLOW_PLOT_MODE = 1U;
+constexpr bool FOLLOW_YAW_DIAGNOSTICS = true;  // 当前：双轴反馈帧数诊断（查 pitch 电机是否在线）
+// 模式 1 画哪根轴：0 = yaw（目标/实际），1 = pitch（目标/实际）
+constexpr unsigned FOLLOW_PLOT_AXIS = 1U;
 
 static_assert(
   FOLLOW_YAW_MOTOR_ID >= 1U && FOLLOW_YAW_MOTOR_ID <= 4U && FOLLOW_PITCH_MOTOR_ID >= 1U &&

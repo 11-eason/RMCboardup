@@ -5,8 +5,11 @@
 
 // 单位：角度 rad、速度 rad/s、加速度 rad/s^2。
 
+// 幅度（总行程，度）。pitch 原为 60（±30°），实测云台只能到 ±18° 附近，
+// 会被机械限位卡住 → 改小到 30（±15°），留 3° 余量。
+// 公式：TRAJECTORY_PITCH_RANGE_DEG = 实测可用行程(度) × 0.85
 #define TRAJECTORY_YAW_RANGE_DEG 45.0f
-#define TRAJECTORY_PITCH_RANGE_DEG 60.0f
+#define TRAJECTORY_PITCH_RANGE_DEG 30.0f
 
 #define TRAJECTORY_SAMPLE_INTERVAL_MS 1U
 #define TRAJECTORY_PERIOD_MS 680U

@@ -49,8 +49,12 @@ extern "C" void plot_task()
     }
     else if (control_constants::FOLLOW_CONSTANT_TORQUE_TEST) {
       const auto state = trajectory_follow::read();
-      // 恒力矩测试：只看实际转速和输出力矩，用来判断静摩擦与转向
-      plotter.plot(state.yaw.actual_speed_rad_s, state.yaw.control_output);
+      // 恒力矩测试（当前用于方向符号测试）：
+      //   通道 1：实际角度（rad）—— 正力矩下应该增大；若减小说明 FOLLOW_YAW_DIRECTION 反了
+      //   通道 2：实际转速（rad/s）—— 用来判断电机是否真的在转（不转=力矩不够或卡住）
+      //   通道 3：输出力矩（N·m）
+      plotter.plot(state.yaw.actual_angle_rad, state.yaw.actual_speed_rad_s,
+                   state.yaw.control_output);
     }
     else if (control_constants::FOLLOW_PLOT_MODE == 0U) {
       const auto meter = power_meter::snapshot();
@@ -119,6 +123,49 @@ extern "C" void plot_task()
       float released[4];
       chassis_diag(target, actual, out, released);
       plotter.plot(target[0], actual[0], out[0], released[0]);
+    }
+    else if (control_constants::FOLLOW_PLOT_MODE == 1U) {
+      const auto state = trajectory_follow::read();
+      if (control_constants::FOLLOW_SINGLE_YAW) {
+        if (control_constants::FOLLOW_YAW_DIAGNOSTICS) {
+          static uint32_t last_yaw_frames = 0, last_tx_frames = 0;
+          const auto bus = trajectory_follow::read_transport();
+          // TX counts HAL mailbox submissions, not verified motor actuation.
+          plotter.plot(state.yaw.target_angle_rad, state.yaw.actual_angle_rad,
+                       state.yaw.control_output, state.active ? 1.0f : 0.0f,
+                       state.feedback_fresh ? 1.0f : 0.0f, static_cast<float>(state.fault),
+                       static_cast<float>(bus.yaw_frames - last_yaw_frames),
+                       static_cast<float>(bus.tx_frames - last_tx_frames));
+          last_yaw_frames = bus.yaw_frames;
+          last_tx_frames = bus.tx_frames;
+        }
+        else {
+          // Both channels use the same trajectory clock and captured zero.
+          plotter.plot(state.yaw.target_angle_rad, state.yaw.actual_angle_rad);
+        }
+      }
+      else {
+        // 模式 1：按 FOLLOW_PLOT_AXIS 选择画哪根轴（0 = yaw，1 = pitch）
+        if (control_constants::FOLLOW_YAW_DIAGNOSTICS) {
+          // 双轴反馈诊断（4 通道）：
+          //   1 = pitch 实际角   2 = pitch 目标角
+          //   3 = pitch 反馈帧数（每 20 ms）  4 = yaw 反馈帧数（每 20 ms）
+          // 判读：帧数 ~15-20 = 在线；帧数为 0 = 该电机没有反馈（ID/接线/开关错）
+          static uint32_t last_yaw_frames = 0, last_pitch_frames = 0;
+          const auto bus = trajectory_follow::read_transport();
+          plotter.plot(state.pitch.actual_angle_rad, state.pitch.target_angle_rad,
+                       static_cast<float>(bus.pitch_frames - last_pitch_frames),
+                       static_cast<float>(bus.yaw_frames - last_yaw_frames));
+          last_yaw_frames = bus.yaw_frames;
+          last_pitch_frames = bus.pitch_frames;
+        }
+        else if (control_constants::FOLLOW_PLOT_AXIS == 1U) {
+          plotter.plot(state.pitch.target_angle_rad, state.pitch.actual_angle_rad);
+        }
+        else {
+          plotter.plot(state.yaw.target_angle_rad, state.yaw.actual_angle_rad);
+        }
+      }
     }
     else {
       const auto state = trajectory_follow::read();
