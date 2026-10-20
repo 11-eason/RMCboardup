@@ -1,175 +1,107 @@
 #include "power_model.hpp"
-
 #include <cmath>
 #include "control_constants.hpp"
 
-namespace chassis_power
-{
+namespace chassis_power {
 Prediction g_prediction = {};
 LimitResult g_limit_result = {};
-
-namespace
-{
-// 实测功率慢速修正系数（路径 B）。
-// 目标：让"实测均值"贴住限幅点（小幅超/欠都可以），而不是保守地待在低功率。
-// 因此必须先把实测功率低通（看均值）；直接用瞬时值会一遇峰值就降额，功率被压得很低。
-float meter_bias = 1.0f;
-float filtered_measured_w = 0.0f;
-bool filter_primed = false;
-uint32_t bias_stamp_ms = 0, bias_sequence = 0;
-
-struct TrendGuard {
+namespace {
+float bounded(float x, float low, float high) { return x < low ? low : (x > high ? high : x); }
+struct MeterControl {
   bool primed = false;
-  uint32_t stamp = 0, sequence = 0, control_stamp = 0;
-  float previous_w = 0.0f, rise_w_s = 0.0f, forecast_w = 0.0f, scale = 1.0f;
+  uint32_t stamp = 0, sequence = 0, control_stamp = 0, interval_ms = 0;
+  float previous_w = 0.0f, filtered_w = 0.0f, rise_w_s = 0.0f, forecast_w = 0.0f;
+  float integral_w = 0.0f, trim_w = 0.0f, guard_scale = 1.0f;
 };
-TrendGuard trend;
+MeterControl meter_control;
 
-void update_trend(float measured_w, bool valid, uint32_t stamp, uint32_t sequence,
-                  uint32_t now, float ceiling_w)
+void update_meter(float measured_w, bool valid, uint32_t stamp, uint32_t sequence,
+                  uint32_t now, float reference_w, const Prediction & demand)
 {
+  auto & m = meter_control;
   if (!valid) {
-    // No derivative across missing feedback; retain derating until valid data returns.
-    trend.primed = false;
-    trend.rise_w_s = 0.0f;
-    trend.control_stamp = now;
-    return;
+    m.primed = false;
+    m.trim_w = m.integral_w = m.rise_w_s = 0.0f;
+    m.interval_ms = 0;
+    m.control_stamp = now;
+    return; // No positive model-budget boost without fresh meter feedback.
   }
-  if (!trend.primed || sequence != trend.sequence) {
-    if (!trend.primed || stamp - trend.stamp > control_constants::POWER_METER_TIMEOUT_MS) {
-      trend.rise_w_s = 0.0f;
+  const bool new_frame = !m.primed || sequence != m.sequence;
+  if (new_frame) {
+    const uint32_t interval = stamp - m.stamp;
+    const bool continuous = m.primed && interval > 0U &&
+                            interval <= control_constants::POWER_METER_TIMEOUT_MS;
+    const float dt = continuous ? interval * 0.001f : 0.0f;
+    m.interval_ms = continuous ? interval : 0U;
+    if (!continuous) {
+      m.filtered_w = measured_w;
+      m.rise_w_s = 0.0f;
+      m.integral_w = m.trim_w = 0.0f;
     }
-    else if (stamp != trend.stamp) {
-      const float dt = (stamp - trend.stamp) * 0.001f;
-      const float rise = (measured_w - trend.previous_w) / dt;
-      const float alpha = dt / (control_constants::POWER_TREND_FILTER_S + dt);
-      trend.rise_w_s += alpha * (rise - trend.rise_w_s);
+    else {
+      const float alpha = dt / (control_constants::POWER_PI_FILTER_S + dt);
+      m.filtered_w += alpha * (measured_w - m.filtered_w);
+      const float slope = (measured_w - m.previous_w) / dt;
+      const float slope_alpha = dt / (control_constants::POWER_TREND_FILTER_S + dt);
+      m.rise_w_s += slope_alpha * (slope - m.rise_w_s);
     }
-    // Never extrapolate a falling trend below the actual reading.
-    const float positive_rise = trend.rise_w_s > 0.0f ? trend.rise_w_s : 0.0f;
-    trend.forecast_w = measured_w + control_constants::POWER_TREND_LEAD_S * positive_rise;
-    if (ceiling_w > 0.0f && trend.forecast_w > ceiling_w) {
-      const float ratio = ceiling_w / trend.forecast_w;
-      // Bounded absolute cap: repeated rising frames must NOT compound derating.
-      if (ratio < trend.scale) trend.scale = ratio;
+    m.forecast_w = measured_w + control_constants::POWER_TREND_LEAD_S *
+                                (m.rise_w_s > 0.0f ? m.rise_w_s : 0.0f);
+    const float hard_w = control_constants::CHASSIS_POWER_LIMIT_W;
+    // Fast guard bypasses PI filtering and executes for every new over-limit frame.
+    float cap = 1.0f;
+    if (m.forecast_w > hard_w) cap = hard_w / m.forecast_w;
+    if (measured_w > hard_w) {
+      // Further reduction is allowed only for a NEW, actually over-limit frame.
+      const float raw_cap = m.guard_scale * bounded(1.0f - control_constants::POWER_FAST_DROP_KP *
+        (measured_w - reference_w) / hard_w,
+        0.0f, control_constants::POWER_FAST_OVER_MAX_SCALE);
+      if (raw_cap < cap) cap = raw_cap;
     }
-    trend.previous_w = measured_w;
-    trend.stamp = stamp;
-    trend.sequence = sequence;
-    trend.primed = true;
-  }
-  const uint32_t elapsed_ms = now - trend.control_stamp;
-  trend.control_stamp = now;
-  const float dt = (elapsed_ms < 20U ? elapsed_ms : 20U) * 0.001f;
-  // Recover toward the current cap, rather than waiting for the forecast to fall
-  // far below the ceiling. Actual power must still have a little headroom.
-  const float target_scale = ceiling_w > 0.0f && trend.forecast_w > ceiling_w ?
-    ceiling_w / trend.forecast_w : 1.0f;
-  if (trend.previous_w < ceiling_w - control_constants::POWER_TREND_RECOVER_BAND_W &&
-      trend.scale < target_scale) {
-    trend.scale += control_constants::POWER_TREND_RECOVER_PER_S * dt;
-    if (trend.scale > target_scale) trend.scale = target_scale;
-  }
-  if (trend.scale > 1.0f) trend.scale = 1.0f;
-  if (trend.scale < 0.0f) trend.scale = 0.0f;
-}
+    if (cap < m.guard_scale) m.guard_scale = cap;
 
-float clamp_bias(float value)
-{
-  const float low = control_constants::POWER_BIAS_MIN;
-  const float high = control_constants::POWER_BIAS_MAX;
-  if (value < low) return low;
-  if (value > high) return high;
-  return value;
-}
-
-// 峰值修正：实测功率超过允许值时，按超限量对限幅系数再打一折。
-// 这是唯一不依赖模型准不准的环节：功率计说超了，就立刻少给力矩。
-void apply_peak_correction(LimitResult & result, float measured_power_w)
-{
-  const float kp = control_constants::POWER_PEAK_KP;
-  if (kp <= 0.0f || !result.meter_used || !std::isfinite(measured_power_w)) return;
-  if (!std::isfinite(result.effective_limit_w) || result.effective_limit_w <= 0.0f) return;
-  const float over = measured_power_w - result.effective_limit_w;
-  if (over <= 0.0f) return;
-  float k = 1.0f - kp * over / result.effective_limit_w;
-  const float lowest = control_constants::POWER_PEAK_MIN;
-  if (k < lowest) k = lowest;
-  result.torque_scale *= k;
-  if (result.torque_scale > 1.0f) result.torque_scale = 1.0f;
-  result.peak_correction = k;
-}
-
-// 前瞻预留：期望功率上升越快，预留越多（限幅在 0 ~ POWER_RESERVE_MAX_W）。
-// 用于抵消加速瞬间"指令已限住、物理功率还没跟上"造成的超调。
-float demand_reserve(float demand_w)
-{
-  constexpr float dt = 0.001f;
-  static float previous_demand_w = 0.0f;
-  static bool primed = false;
-  if (!primed) {
-    previous_demand_w = demand_w;
-    primed = true;
-    return 0.0f;
+    // No PI action for released motors or net braking. PI cannot manufacture demand.
+    const bool has_demand = demand.valid && demand.torque_sq_sum > 1e-6f &&
+                            demand.mechanical_w >= 0.0f;
+    if (!has_demand) {
+      m.trim_w = m.integral_w = 0.0f;
+    }
+    else if (continuous) {
+      float error = reference_w - m.filtered_w;
+      const float band = control_constants::POWER_PI_DEADBAND_W;
+      error = error > band ? error - band : (error < -band ? error + band : 0.0f);
+      // Allow positive correction only when model-limited and guard is released.
+      const bool can_raise = demand.total_w > reference_w + m.trim_w &&
+                             m.guard_scale >= 0.999f && measured_w < hard_w;
+      const float p = control_constants::POWER_PI_KP * error;
+      float increment = control_constants::POWER_PI_KI * error * dt;
+      if (increment > 0.0f && !can_raise) increment = 0.0f;
+      const float lo = control_constants::POWER_PI_TRIM_MIN_W;
+      const float hi = control_constants::POWER_PI_TRIM_MAX_W;
+      const float candidate_i = bounded(m.integral_w + increment, lo, hi);
+      const float candidate = p + candidate_i;
+      // Conditional integration: no windup at either budget-correction limit.
+      if (!((candidate > hi && increment > 0.0f) ||
+            (candidate < lo && increment < 0.0f))) m.integral_w = candidate_i;
+      float requested = bounded(p + m.integral_w, lo, hi);
+      if (!can_raise && requested > m.trim_w) requested = m.trim_w;
+      const float max_increase = control_constants::POWER_PI_RISE_W_PER_S * dt;
+      if (requested > m.trim_w + max_increase) requested = m.trim_w + max_increase;
+      m.trim_w = requested;
+    }
+    m.stamp = stamp; m.sequence = sequence; m.previous_w = measured_w; m.primed = true;
   }
-  const float rate = (demand_w - previous_demand_w) / dt;  // W/s
-  previous_demand_w = demand_w;
-  if (rate <= 0.0f) return 0.0f;  // 只在上升时预留
-  float reserve = rate * control_constants::POWER_RESERVE_LEAD_S;
-  const float max_reserve = control_constants::POWER_RESERVE_MAX_W;
-  if (reserve > max_reserve) reserve = max_reserve;
-  return reserve;
-}
-
-// Measurement correction runs only on a new CAN sample, using its actual interval.
-void update_meter_bias(float measured_power_w, float limit_w,
-                       uint32_t stamp_ms, uint32_t sequence)
-{
-  if (filter_primed && sequence == bias_sequence) return;
-  const uint32_t elapsed_ms = stamp_ms - bias_stamp_ms;
-  if (!filter_primed || elapsed_ms > control_constants::POWER_METER_TIMEOUT_MS) {
-    filtered_measured_w = measured_power_w;
-    filter_primed = true;
-    bias_stamp_ms = stamp_ms;
-    bias_sequence = sequence;
-    return;  // Prime only; do not integrate across startup/dropout.
-  }
-  bias_stamp_ms = stamp_ms;
-  bias_sequence = sequence;
-  if (elapsed_ms == 0U) return;
-  const float dt = elapsed_ms * 0.001f;
-  const float nominal_steps = dt / 0.001f;
-  const float tau = control_constants::POWER_BIAS_FILTER_S;
-  if (!filter_primed) {
-    filtered_measured_w = measured_power_w;
-    filter_primed = true;
-  }
-  else {
-    const float alpha = dt / (tau + dt);
-    filtered_measured_w += alpha * (measured_power_w - filtered_measured_w);
-  }
-  // 用均值判断，而不是瞬时值
-  const float error = filtered_measured_w - limit_w;
-  // Once the actual reading is below target, do not keep reducing the budget
-  // solely because the 0.3 s filter still remembers an earlier peak.
-  if (error > 0.0f && measured_power_w > limit_w) {
-    // 均值超限：降额（约 0.2 s 响应 10 W 误差）
-    float change = control_constants::POWER_BIAS_DOWN_PER_W * error * nominal_steps;
-    if (change > control_constants::POWER_BIAS_MAX_STEP)
-      change = control_constants::POWER_BIAS_MAX_STEP;
-    meter_bias = clamp_bias(meter_bias - change);
-  }
-  else if (error < -control_constants::POWER_BIAS_RECOVER_BAND_W &&
-           measured_power_w < limit_w - control_constants::POWER_BIAS_RECOVER_BAND_W) {
-    // 均值明显低于限幅：上调，把功率用满（也用于修正模型偏大）
-    float change = control_constants::POWER_BIAS_UP_PER_W *
-      (-error - control_constants::POWER_BIAS_RECOVER_BAND_W) * nominal_steps;
-    if (change > control_constants::POWER_BIAS_MAX_STEP)
-      change = control_constants::POWER_BIAS_MAX_STEP;
-    meter_bias = clamp_bias(meter_bias + change);
+  // Release only below target with forecast headroom. Smooth actuator recovery at 1 kHz.
+  const uint32_t elapsed = now - m.control_stamp;
+  m.control_stamp = now;
+  const float dt = (elapsed < 20U ? elapsed : 20U) * 0.001f;
+  if (measured_w < reference_w - control_constants::POWER_TREND_RECOVER_BAND_W &&
+      m.forecast_w < control_constants::CHASSIS_POWER_LIMIT_W) {
+    m.guard_scale = bounded(m.guard_scale +
+      control_constants::POWER_TREND_RECOVER_PER_S * dt, 0.0f, 1.0f);
   }
 }
-}  // namespace
+} // namespace
 
 Prediction predict(const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid)
 {
@@ -215,100 +147,64 @@ Prediction predict(const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid)
   result.valid = feedback_valid;
   return result;
 }
-LimitResult limit(
-  const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid, float measured_power_w,
-  bool power_measured_valid, uint32_t meter_stamp_ms, uint32_t meter_sequence, uint32_t now_ms)
+LimitResult limit(const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid,
+                  float measured_power_w, bool power_measured_valid,
+                  uint32_t meter_stamp_ms, uint32_t meter_sequence, uint32_t now_ms)
 {
   LimitResult result = {};
-  result.limit_w = control_constants::CHASSIS_POWER_LIMIT_W -
-                   control_constants::POWER_LIMIT_MARGIN_W;
-  result.peak_correction = 1.0f;
-  result.meter_used = power_measured_valid && std::isfinite(measured_power_w) && measured_power_w >= 0.0f;
-  update_trend(measured_power_w, result.meter_used, meter_stamp_ms, meter_sequence,
-               now_ms, result.limit_w);
-  result.measured_rise_w_s = trend.rise_w_s;
-  result.measured_forecast_w = trend.forecast_w;
-  result.trend_scale = trend.scale;
-  if (result.meter_used && std::isfinite(result.limit_w) && result.limit_w > 0.0f)
-    update_meter_bias(measured_power_w, result.limit_w, meter_stamp_ms, meter_sequence);
-  else
-    filter_primed = false;  // Re-prime on reconnection; retain bounded bias.
-  result.meter_bias = meter_bias;
-  result.measured_filtered_w = filter_primed ? filtered_measured_w : 0.0f;
+  result.limit_w = control_constants::CHASSIS_POWER_LIMIT_W - control_constants::POWER_LIMIT_MARGIN_W;
   result.before = predict(motors, feedback_valid);
-  // 前瞻预留：期望功率快速上升（即将加速）时提前压低允许值，抑制加速瞬间的超调
-  const float reserve = demand_reserve(result.before.total_w);
-  result.effective_limit_w = result.limit_w * meter_bias - reserve;
+  result.meter_used = power_measured_valid && std::isfinite(measured_power_w) && measured_power_w >= 0.0f;
+  update_meter(measured_power_w, result.meter_used, meter_stamp_ms, meter_sequence,
+               now_ms, result.limit_w, result.before);
+  const auto & m = meter_control;
+  result.pi_trim_w = m.trim_w;
+  result.pi_integral_w = m.integral_w;
+  result.measured_filtered_w = m.filtered_w;
+  result.measured_rise_w_s = m.rise_w_s;
+  result.measured_forecast_w = m.forecast_w;
+  result.trend_scale = m.guard_scale;
+  result.meter_interval_ms = m.interval_ms;
+  result.fast_over_limit = result.meter_used && measured_power_w > control_constants::CHASSIS_POWER_LIMIT_W;
+  result.effective_limit_w = result.limit_w + m.trim_w;
   if (result.effective_limit_w < 0.0f) result.effective_limit_w = 0.0f;
-  result.limited = true;
+
   MotorState scaled[MOTOR_COUNT];
-  for (std::size_t i = 0; i < MOTOR_COUNT; ++i)
-    scaled[i] = {0.0f, motors[i].measured_speed_rad_s};
-  const auto finalize = [&]() {
-    // Avoid weakening net braking solely because measured consumption was high.
-    if (result.before.mechanical_w >= 0.0f) result.torque_scale *= trend.scale;
-    if (result.torque_scale < 0.0f) result.torque_scale = 0.0f;
-    if (result.torque_scale > 1.0f) result.torque_scale = 1.0f;
-    for (std::size_t i = 0; i < MOTOR_COUNT; ++i)
-      scaled[i].commanded_torque_nm = motors[i].commanded_torque_nm * result.torque_scale;
-    // Report prediction for the FINAL command, including all extra corrections.
-    result.after = predict(scaled, feedback_valid);
+  for (std::size_t i = 0; i < MOTOR_COUNT; ++i) scaled[i] = {0.0f, motors[i].measured_speed_rad_s};
+  const auto evaluate = [&](float k) {
+    for (std::size_t i = 0; i < MOTOR_COUNT; ++i) scaled[i].commanded_torque_nm = motors[i].commanded_torque_nm * k;
+    return predict(scaled, feedback_valid);
+  };
+  const auto finish = [&]() {
+    // Guard must not weaken net braking. Normal consuming demand gets fast protection.
+    if (result.before.mechanical_w >= 0.0f) result.torque_scale *= m.guard_scale;
+    result.torque_scale = bounded(result.torque_scale, 0.0f, 1.0f);
+    result.after = evaluate(result.torque_scale);
     result.limited = result.torque_scale < 1.0f;
     result.feasible = result.after.valid && result.after.total_w <= result.effective_limit_w;
     return result;
   };
-  result.after = predict(scaled, feedback_valid);
-  if (!result.before.valid || !std::isfinite(result.effective_limit_w) ||
-      result.effective_limit_w < 0.0f)
-    return finalize();
-
+  if (!result.before.valid || !std::isfinite(result.effective_limit_w)) return finish();
   if (result.before.total_w <= result.effective_limit_w) {
     result.torque_scale = 1.0f;
-    result.after = result.before;
-    result.limited = false;
-    result.feasible = true;
-    // 模型认为不用限，但实测可能已经超了（模型误差）→ 仍做峰值修正
-    apply_peak_correction(result, measured_power_w);
-    return finalize();
+    return finish();
   }
-
-  // Raw P(k) = a*k*k + b*k + c; reported power is max(0, P(k)).
-  // Find the constrained minimum first, then search its increasing branch.
-  const double a = result.before.torque_loss_w;
-  const double b = result.before.mechanical_w;
+  // Original model polynomial: a*k^2 + b*k + c, clipped to nonnegative watts.
+  const double a = result.before.torque_loss_w, b = result.before.mechanical_w;
   float low = 0.0f;
-  if (a > 0.0 && b < 0.0) {
-    const double minimum = -b / (2.0 * a);
-    low = minimum < 1.0 ? static_cast<float>(minimum) : 1.0f;
-  }
-  const auto evaluate = [&](float scale) {
-    for (std::size_t i = 0; i < MOTOR_COUNT; ++i)
-      scaled[i].commanded_torque_nm = motors[i].commanded_torque_nm * scale;
-    return predict(scaled, feedback_valid);
-  };
+  if (a > 0.0 && b < 0.0) low = bounded(static_cast<float>(-b / (2.0*a)), 0.0f, 1.0f);
   if (a == 0.0 && b < 0.0) low = 1.0f;
   result.torque_scale = low;
-  result.after = evaluate(low);
-  if (!result.after.valid || result.after.total_w > result.effective_limit_w) return finalize();
-
-  result.feasible = true;
+  const Prediction minimum = evaluate(low);
+  if (!minimum.valid || minimum.total_w > result.effective_limit_w) return finish();
   float high = 1.0f;
   for (unsigned i = 0; i < control_constants::POWER_LIMIT_SEARCH_STEPS; ++i) {
-    const float middle = low + (high - low) * 0.5f;
+    const float middle = low + (high-low)*0.5f;
     const Prediction candidate = evaluate(middle);
-    // Test the actual float model, retaining a known feasible lower endpoint.
-    if (candidate.valid && candidate.total_w <= result.effective_limit_w) {
-      low = middle;
-      result.after = candidate;
-    }
-    else {
-      high = middle;
-    }
+    if (candidate.valid && candidate.total_w <= result.effective_limit_w) low = middle;
+    else high = middle;
   }
   result.torque_scale = low;
-  // 峰值修正：模型有误差，但"实测超过允许值"是确定的。
-  // 按实测超限量立刻再打一折，直接压尖峰（不依赖模型准不准）。
-  apply_peak_correction(result, measured_power_w);
-  return finalize();
+  return finish();
 }
-}  // namespace chassis_power
+} // namespace chassis_power

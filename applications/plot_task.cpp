@@ -1,12 +1,13 @@
 #include <limits>
-#include "cmsis_os.h"
+
 #include "FreeRTOS.h"
-#include "task.h"
+#include "cmsis_os.h"
 #include "control_constants.hpp"
 #include "infrared_status.hpp"
 #include "io/plotter/plotter.hpp"
 #include "power_meter.hpp"
 #include "power_model.hpp"
+#include "task.h"
 #include "trajectory_follow.hpp"
 #include "trajectory_task.hpp"
 #include "usart.h"
@@ -34,16 +35,14 @@ extern "C" void plot_task()
       const float frames = static_cast<float>(status.valid_frames - previous_frames);
       if (control_constants::INFRARED_PLOT_RAW_FIELDS) {
         // Append ONLY fields from the last checksum-correct frame. No smoothing.
-        plotter.plot(status.valid ? status.distance_cm : missing,
-                     status.valid ? 1.0f : 0.0f, bytes, frames,
-                     static_cast<float>(status.raw_distance),
-                     static_cast<float>(status.payload_byte2),
-                     static_cast<float>(status.payload_byte3),
-                     static_cast<float>(status.last_payload_length));
+        plotter.plot(
+          status.distance_cm, status.valid ? 1.0f : 0.0f, bytes, frames,
+          static_cast<float>(status.raw_distance), static_cast<float>(status.payload_byte2),
+          static_cast<float>(status.payload_byte3), static_cast<float>(status.last_payload_length));
       }
       else {
-        plotter.plot(status.valid ? status.distance_cm : missing,
-                     status.valid ? 1.0f : 0.0f, bytes, frames);
+        plotter.plot(
+          status.valid ? status.distance_cm : missing, status.valid ? 1.0f : 0.0f, bytes, frames);
       }
       previous_bytes = status.received_bytes;
       previous_frames = status.valid_frames;
@@ -52,7 +51,8 @@ extern "C" void plot_task()
       const auto state = trajectory_follow::read();
       // 恒力矩测试：只看实际转速和输出力矩，用来判断静摩擦与转向
       plotter.plot(state.yaw.actual_speed_rad_s, state.yaw.control_output);
-    } else if (control_constants::FOLLOW_PLOT_MODE == 0U) {
+    }
+    else if (control_constants::FOLLOW_PLOT_MODE == 0U) {
       const auto meter = power_meter::snapshot();
       // Chassis task updates the limit result at 1 kHz; copy before UART transmit.
       taskENTER_CRITICAL();
@@ -65,10 +65,24 @@ extern "C" void plot_task()
       // 实测功率超限时，如果通道 3 还是 1.0 → 限幅器没参与；如果 <1 → 限幅器在工作，
       // 那超调就来自模型误差或物理响应延迟。
       plotter.plot(meter.power_w, demand_w, scale);
-    } else if (control_constants::FOLLOW_PLOT_MODE == 2U) {
+    }
+    else if (control_constants::FOLLOW_PLOT_MODE == 5U) {
+      const auto meter = power_meter::snapshot();
+      taskENTER_CRITICAL();
+      const auto power = chassis_power::g_limit_result;
+      taskEXIT_CRITICAL();
+      // Optional PI diagnostic: measured, target, K, PI trim, guard, CAN interval,
+      // forecast and final-command prediction. Raw measured power is unchanged.
+      plotter.plot(
+        meter.power_w, power.limit_w, power.torque_scale, power.pi_trim_w, power.trend_scale,
+        static_cast<float>(power.meter_interval_ms), power.measured_forecast_w,
+        power.after.total_w);
+    }
+    else if (control_constants::FOLLOW_PLOT_MODE == 2U) {
       const TrajectoryPoint target = trajectory_read();
       plotter.plot(target.yaw, target.pitch);
-    } else if (control_constants::FOLLOW_PLOT_MODE == 4U) {
+    }
+    else if (control_constants::FOLLOW_PLOT_MODE == 4U) {
       // 功率模型标定（4 通道），用于离线最小二乘拟合：
       //   通道 1：机械功率 Σ(τ·ω)（W）
       //   通道 2：Στ² × 100   （读数 / 100 才是 Στ²）
@@ -94,7 +108,8 @@ extern "C" void plot_task()
       }
       primed = true;
       plotter.plot(filtered[0], filtered[1], filtered[2], filtered[3]);
-    } else if (control_constants::FOLLOW_PLOT_MODE == 3U) {
+    }
+    else if (control_constants::FOLLOW_PLOT_MODE == 3U) {
       // 底盘诊断（4 通道）：FL 目标速度、FL 实际速度、FL 输出力矩、静止释放标志
       // 判读：静止时 1 和 2 若在 ±0.5 rad/s 内来回、3 在 ±0.8 附近跳 → 就是零速刹车循环；
       //       通道 4 为 1 表示该轮已进入"放开"状态（输出 0，自由滑停）。
@@ -104,7 +119,8 @@ extern "C" void plot_task()
       float released[4];
       chassis_diag(target, actual, out, released);
       plotter.plot(target[0], actual[0], out[0], released[0]);
-    } else {
+    }
+    else {
       const auto state = trajectory_follow::read();
       plotter.plot(
         state.yaw.target_angle_rad, state.yaw.actual_angle_rad, state.pitch.target_angle_rad,

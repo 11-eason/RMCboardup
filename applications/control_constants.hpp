@@ -4,7 +4,7 @@
 namespace control_constants
 {
 // GY-56 receive test: physical 3-pin UART1 = USART6.
-constexpr bool INFRARED_PLOT_TEST = false;
+constexpr bool INFRARED_PLOT_TEST = true;
 constexpr bool INFRARED_PLOT_RAW_FIELDS = true;   // 8 channels; false restores 4.
 constexpr unsigned INFRARED_UART_BAUD = 115200U;  // Set 115200 if module was configured so.
 constexpr bool INFRARED_AUTO_BAUD = true;
@@ -34,24 +34,14 @@ static_assert(INFRARED_RAW_TO_CM > 0.0f, "Invalid distance unit conversion");
 //   录一段真正跑到 90~100 W 的数据重新拟合，再用 3~4 W 裕量。
 // K2 must be calibrated in the actual shaft-speed coordinates.
 // Rotor-to-output conversion multiplies the speed-squared coefficient by ratio^2.
-constexpr float POWER_K1 = 2.03f;   // W / (N*m)^2（经验值，实测表现优于 3.97）
+constexpr float POWER_K1 = 2.03f;   // W / (N*m)^2
 constexpr float POWER_K2 = 0.009f;  // W / (rad/s)^2
 constexpr float POWER_K3 = 4.1f;    // W, 整机空载损耗
 
-// ---- 峰值修正（直接对实测功率做快速削弱）----
-// 模型永远有误差，而"实测超过限幅"是确定的。这里按实测超限量立刻再打一折：
-//   k = 1 − KP × (P实测 − 允许) / 允许,  限幅在 [MIN, 1]
-// 超 10 W（允许 78）时 k≈0.87，超 20 W 时 k≈0.74，能把尖峰压回去。
-// 因为闭环建立在"功率计读数"上，KP 太大会跟着测量延迟来回摆，调小即可。
-constexpr float POWER_PEAK_KP = 0.0f;   // 0 = 关闭。实测：开启后与限幅环打架，抖动变大
-constexpr float POWER_PEAK_MIN = 0.6f;  // 最多再削到 60%
-static_assert(
-  POWER_PEAK_KP >= 0.0f && POWER_PEAK_MIN > 0.0f && POWER_PEAK_MIN <= 1.0f,
-  "Invalid peak correction gains");
 constexpr bool POWER_MODEL_CALIBRATED = false;
 
 constexpr float CHASSIS_POWER_LIMIT_W = 80.0f;
-// 名义裕量：允许功率 = (LIMIT - MARGIN) × bias。
+// Measured-power PI target = LIMIT - MARGIN; model budget = target + bounded PI trim.
 // 标定后模型误差只有 ±1.5 W（最大 6.5 W），所以裕量可以从 8 W 降回 4 W：
 //   限幅点 76 W，均值贴 76，峰值约 80~82。
 // 想更激进用 3；想更保守用 5~6。
@@ -63,37 +53,27 @@ static_assert(
 constexpr unsigned POWER_LIMIT_SEARCH_STEPS = 24;
 static_assert(POWER_LIMIT_SEARCH_STEPS > 0, "Search needs at least one step");
 
-// ---- 实测功率慢速修正（路径 B）----
-// 用功率计实测值修正允许功率，使**实测均值**收敛到限幅点。
-// 关键：先对实测功率做低通（看均值），否则峰值一超就降额，会把功率压得很低。
-// DOWN：实测均值每超限 1 W，系数每毫秒减小多少（10 W 误差约 0.2 s 响应）
-constexpr float POWER_BIAS_DOWN_PER_W = 5e-5f;
-// UP：解除过度降额/抬高允许值的速率（10 W 偏差约 0.5 s 响应）
-constexpr float POWER_BIAS_UP_PER_W = 4e-5f;
-// Slow correction can lower the budget and recover to nominal, never above nominal.
-constexpr float POWER_BIAS_MIN = 0.6f;
-constexpr float POWER_BIAS_MAX = 1.0f;  // Never raise the model budget above limit - margin.
-// 实测均值低于限幅多少瓦以上才开始上调
-constexpr float POWER_BIAS_RECOVER_BAND_W = 0.5f;
-// 实测功率低通时间常数（s）：它决定 bias 盯的是"均值"还是"峰值"
-constexpr float POWER_BIAS_FILTER_S = 0.3f;
-// Keep existing gains in their nominal-1ms units; scale by actual meter interval.
-constexpr float POWER_BIAS_MAX_STEP = 0.01f;  // Bound a single new-frame update.
-static_assert(
-  POWER_BIAS_MAX_STEP > 0.0f && POWER_BIAS_MAX_STEP <= 0.05f,
-  "Invalid measured-power feedback step");
-
-// ---- 加速瞬间的前瞻预留（抑制功率超调）----
-// 限幅器改的是指令力矩，而真实功率是"力矩×转速"的物理结果：加速瞬间四轮同时提速，
-// 机械功率陡增，会出现 100 ms 级的超调（实测 78 W 均值下峰值冲到 100~110 W）。
-// 做法：期望功率上升越快，越提前压低允许值。
-//   预留量 = 期望功率上升速率(W/s) × POWER_RESERVE_LEAD_S，上限 POWER_RESERVE_MAX_W
-// 代价：加速略缓。LEAD 设 0 即关闭该功能。
-constexpr float POWER_RESERVE_LEAD_S = 0.02f;  // 前瞻预留（实测有效，保留）
-constexpr float POWER_RESERVE_MAX_W = 8.0f;    // 最多预留 15 W
-static_assert(POWER_RESERVE_LEAD_S >= 0.0f && POWER_RESERVE_MAX_W >= 0.0f, "Invalid reserve");
 // 功率计多久没更新就视为无效（不再参与修正）
 constexpr unsigned POWER_METER_TIMEOUT_MS = 200U;
+
+// Measured-power PI (budget correction in W), matching power_model.cpp.
+constexpr float POWER_PI_KP = 0.4f;
+constexpr float POWER_PI_KI = 1.5f;
+constexpr float POWER_PI_FILTER_S = 0.03f;
+constexpr float POWER_PI_DEADBAND_W = 0.3f;
+constexpr float POWER_PI_TRIM_MIN_W = -40.0f;
+constexpr float POWER_PI_TRIM_MAX_W = 12.0f;
+constexpr float POWER_PI_RISE_W_PER_S = 20.0f;
+constexpr float POWER_FAST_DROP_KP = 2.0f;
+constexpr float POWER_FAST_OVER_MAX_SCALE = 0.95f;
+static_assert(
+  POWER_PI_KP >= 0.0f && POWER_PI_KI >= 0.0f && POWER_PI_FILTER_S > 0.0f &&
+    POWER_PI_DEADBAND_W >= 0.0f && POWER_PI_TRIM_MIN_W <= 0.0f && POWER_PI_TRIM_MAX_W >= 0.0f &&
+    POWER_PI_RISE_W_PER_S > 0.0f,
+  "Invalid measured-power PI");
+static_assert(
+  POWER_FAST_DROP_KP > 0.0f && POWER_FAST_OVER_MAX_SCALE > 0.0f && POWER_FAST_OVER_MAX_SCALE < 1.0f,
+  "Invalid fast power guard");
 
 // Fast measured-power trend guard, separate from the original prediction formula.
 constexpr float POWER_TREND_LEAD_S = 0.05f;    // Forecast horizon.
@@ -107,12 +87,6 @@ static_assert(
   POWER_TREND_FILTER_S > 0.0f && POWER_TREND_RECOVER_PER_S > 0.0f &&
     POWER_TREND_RECOVER_BAND_W >= 0.0f,
   "Invalid power trend guard parameters");
-
-static_assert(
-  POWER_BIAS_MIN > 0.0f && POWER_BIAS_MIN <= POWER_BIAS_MAX, "Invalid power bias range");
-static_assert(
-  POWER_BIAS_DOWN_PER_W > 0.0f && POWER_BIAS_UP_PER_W >= 0.0f && POWER_BIAS_RECOVER_BAND_W >= 0.0f,
-  "Invalid power bias gains");
 
 // =====================================================================
 // ===== 云台轨迹跟随 =====

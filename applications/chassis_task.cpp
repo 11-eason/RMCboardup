@@ -109,7 +109,7 @@ float update_power_prediction(float fl, float fr, float rl, float rr)
   const chassis_power::MotorState motors[chassis_power::MOTOR_COUNT] = {
     {fl, motor_fl.speed}, {fr, motor_fr.speed}, {rl, motor_rl.speed}, {rr, motor_rr.speed}};
   taskEXIT_CRITICAL();
-  // 路径 B：把功率计实测值送进限幅器，用慢速修正吸收模型误差
+  // Measured-power PI + fast guard use only fresh meter samples.
   const auto meter = power_meter::snapshot();
   const bool meter_ok = power_meter::is_alive(now, control_constants::POWER_METER_TIMEOUT_MS) &&
                         std::isfinite(meter.power_w) && meter.power_w >= 0.0f;
