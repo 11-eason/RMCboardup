@@ -4,7 +4,7 @@
 namespace control_constants
 {
 // Dedicated GIMBAL C-board homing. CAN1 must NOT share ID1 with chassis drives.
-constexpr bool HOME_MODE = true;
+constexpr bool HOME_MODE = true;  // Homing-only debug: no automatic trajectory handoff.
 constexpr bool HOME_AUTO_START = true;
 constexpr unsigned HOME_PITCH_ID = 2U;
 constexpr unsigned HOME_M2006_ID = 1U;

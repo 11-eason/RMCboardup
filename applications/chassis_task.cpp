@@ -10,7 +10,7 @@
 #include "task.h"
 #include "tools/pid/pid.hpp"
 #include "trajectory_follow.hpp"
-#include "gimbal_homing.hpp"
+#include "homing.hpp"
 
 namespace
 {
@@ -191,9 +191,9 @@ extern "C" void chassis_task()
 
   for (;;) {
     osDelayUntil(&last_wake, 1);
-    if (gimbal_homing::selected()) {
+    if (homing::selected()) {
       // Dedicated gimbal board: no legacy chassis 0x200 or tracking 0x1FE writes.
-      gimbal_homing::transmit_can1(osKernelSysTick());
+      homing::transmit_can1(osKernelSysTick());
       continue;
     }
     chassis_update();
@@ -226,7 +226,7 @@ void receive_can_fifo(CAN_HandleTypeDef * hcan, uint32_t fifo)
     for (unsigned i = 0; i < 8; ++i) can1.rx_data[i] = data[i];
     const uint32_t stamp_ms = osKernelSysTick();
     // M2006 ID1 uses 0x201; consume before legacy M3508 ID1 dispatch.
-    if (gimbal_homing::receive_can1(header, data, stamp_ms)) continue;
+    if (homing::receive_can1(header, data, stamp_ms)) continue;
     if (header.StdId == power_meter::FEEDBACK_ID)
       power_meter::receive(header, data, stamp_ms);
     else if (header.StdId == motor_fl.rx_id)

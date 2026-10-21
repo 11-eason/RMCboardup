@@ -1,4 +1,5 @@
 #include "trajectory_follow.hpp"
+#include "homing.hpp"
 
 #include <cmath>
 
@@ -516,6 +517,8 @@ TransportStatus read_transport()
 
 void transmit_can1(uint32_t now_ms, bool permitted)
 {
+  if (::homing::selected()) return;  // Homing mode owns motor output, including hold/fault.
+
   // 电流帧周期 = 执行器采样周期，见文件头注释。这里是"必要不充分"的频率控制：
   // 只有真正发出新帧，电机才会更新力矩。
   if (sent_once && (now_ms - last_tx_ms) < control_constants::FOLLOW_CAN_TX_INTERVAL_MS) return;
@@ -709,5 +712,8 @@ void run()
 extern "C" void trajectory_follow_task(void const * argument)
 {
   (void)argument;
+  // Preserve the original task. Homing-only debugging keeps tracking waiting,
+  // including after homing completes; do not release outputs automatically.
+  while (::homing::selected()) vTaskDelay(pdMS_TO_TICKS(10));
   trajectory_follow::run();
 }

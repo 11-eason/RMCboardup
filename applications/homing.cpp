@@ -1,12 +1,11 @@
-#include "gimbal_homing.hpp"
+#include "homing.hpp"
 #include <cmath>
 #include "FreeRTOS.h"
 #include "task.h"
 #include "control_constants.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
-#include "trajectory_follow.hpp"
 
-namespace gimbal_homing {
+namespace homing {
 namespace {
 namespace c = control_constants;
 static_assert(configTICK_RATE_HZ == 1000, "Homing requires 1ms ticks");
@@ -188,8 +187,10 @@ void run() {
     if (elapsed>c::HOME_MAX_STEP_MS) wake=now;
   }
 }
-} // namespace gimbal_homing
-extern "C" void gimbal_homing_task(void const * argument) {
-  if (!gimbal_homing::selected()) {trajectory_follow_task(argument);return;}
-  gimbal_homing::run();
+} // namespace homing
+extern "C" void homing_task(void const * argument) {
+  (void)argument;
+  // The user's independent homing task owns this controller only.
+  if (homing::selected()) homing::run();
+  for (;;) {vTaskDelay(pdMS_TO_TICKS(100));}
 }

@@ -356,8 +356,8 @@ void StartTrajectoryTask(void const * argument)
 void StartTrajectoryFollow(void const * argument)
 {
   /* USER CODE BEGIN StartTrajectoryFollow */
-  extern void gimbal_homing_task(void const * argument);
-  gimbal_homing_task(argument);
+  extern void trajectory_follow_task(void const * argument);
+  trajectory_follow_task(argument);
   /* USER CODE END StartTrajectoryFollow */
 }
 
@@ -371,11 +371,8 @@ void StartTrajectoryFollow(void const * argument)
 void StartTask12(void const * argument)
 {
   /* USER CODE BEGIN StartTask12 */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
+  extern void homing_task(void const * argument);
+  homing_task(argument);
   /* USER CODE END StartTask12 */
 }
 

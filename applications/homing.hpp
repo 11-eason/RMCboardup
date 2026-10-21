@@ -1,8 +1,8 @@
-#ifndef GIMBAL_HOMING_HPP
-#define GIMBAL_HOMING_HPP
+#ifndef HOMING_HPP
+#define HOMING_HPP
 #include <cstdint>
 #include "can.h"
-namespace gimbal_homing {
+namespace homing {
 enum class Stage : uint8_t { Idle=0, WaitFeedback=1, SeekPitch=2, MoveM2006=3, Done=4, Fault=5 };
 enum class Fault : uint8_t { None=0, Config=1, Feedback=2, Timing=3, SeekTimeout=4,
   SeekTravel=5, MoveTimeout=6, Overspeed=7, MoveOvershoot=8 };
@@ -29,5 +29,5 @@ Status snapshot();
 bool receive_can1(const CAN_RxHeaderTypeDef &, uint8_t *, uint32_t now_ms);
 void transmit_can1(uint32_t now_ms);
 }
-extern "C" void gimbal_homing_task(void const * argument);
+extern "C" void homing_task(void const * argument);
 #endif
