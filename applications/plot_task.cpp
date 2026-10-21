@@ -9,6 +9,7 @@
 #include "power_model.hpp"
 #include "task.h"
 #include "trajectory_follow.hpp"
+#include "gimbal_homing.hpp"
 #include "trajectory_task.hpp"
 #include "usart.h"
 
@@ -27,7 +28,14 @@ extern "C" void plot_task()
   uint32_t last_wake = osKernelSysTick();
   for (;;) {
     osDelayUntil(&last_wake, 20);
-    if (control_constants::INFRARED_PLOT_TEST) {
+    if (gimbal_homing::selected()) {
+      const auto home=gimbal_homing::snapshot();
+      // 6ch: phase, GM6020 angle, M2006 target/actual relative angles, fault, done.
+      plotter.plot(static_cast<float>(home.stage), home.pitch_angle_rad,
+                   home.m2006_target_relative_rad, home.m2006_relative_rad,
+                   static_cast<float>(home.fault), home.homed ? 1.0f : 0.0f);
+    }
+    else if (control_constants::INFRARED_PLOT_TEST) {
       static uint32_t previous_bytes = 0, previous_frames = 0;
       const auto status = infrared::snapshot();
       const float missing = std::numeric_limits<float>::quiet_NaN();

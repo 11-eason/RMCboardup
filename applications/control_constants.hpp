@@ -3,6 +3,59 @@
 
 namespace control_constants
 {
+// Dedicated GIMBAL C-board homing. CAN1 must NOT share ID1 with chassis drives.
+constexpr bool HOME_MODE = true;
+constexpr bool HOME_AUTO_START = true;
+constexpr unsigned HOME_PITCH_ID = 2U;
+constexpr unsigned HOME_M2006_ID = 1U;
+constexpr float HOME_PITCH_RATIO = 1.0f;
+constexpr float HOME_M2006_RATIO = 36.0f;  // Output-shaft angle/speed/torque.
+constexpr float HOME_PITCH_DIRECTION = 1.0f;  // Assumed rearward = encoder-positive.
+constexpr float HOME_M2006_DIRECTION = -1.0f; // Reverse in M2006 encoder coordinates.
+constexpr float HOME_M2006_MOVE_RAD = 1.0471975512f;  // Mechanism/output shaft 60 deg.
+
+// Initial trial settings, not a mechanical rating or a tuned controller.
+constexpr float HOME_PITCH_SEEK_SPEED_RAD_S = 0.35f;
+constexpr float HOME_PITCH_SPEED_KP = 0.015f;
+constexpr float HOME_PITCH_SPEED_KI = 0.45f;
+constexpr float HOME_PITCH_MAX_TORQUE_NM = 0.18f;
+constexpr float HOME_PITCH_STALL_SPEED_RAD_S = 0.05f;
+constexpr float HOME_PITCH_STALL_TORQUE_NM = 0.10f; // Feedback AND commanded torque.
+constexpr float HOME_PITCH_STALL_TRAVEL_RAD = 0.008726646f; // <=0.5 deg / stall window.
+constexpr unsigned HOME_PITCH_STALL_MS = 400U;
+constexpr unsigned HOME_PITCH_STARTUP_BLANK_MS = 300U;
+constexpr unsigned HOME_PITCH_TIMEOUT_MS = 10000U;
+constexpr float HOME_PITCH_MAX_TRAVEL_RAD = 1.570796327f; // Software search cap 90 deg.
+
+constexpr float HOME_M2006_POSITION_KP = 4.0f;
+constexpr float HOME_M2006_SPEED_KP = 0.10f;
+constexpr float HOME_M2006_SPEED_KI = 0.20f;
+constexpr float HOME_M2006_MAX_TORQUE_NM = 0.30f;
+constexpr float HOME_M2006_MAX_SPEED_RAD_S = 0.35f;
+constexpr float HOME_TARGET_ACCEL_RAD_S2 = 0.50f;
+constexpr float HOME_M2006_TOLERANCE_RAD = 0.017453293f; // 1 deg.
+constexpr float HOME_M2006_SETTLE_SPEED_RAD_S = 0.05f;
+constexpr unsigned HOME_M2006_SETTLE_MS = 250U;
+constexpr unsigned HOME_M2006_TIMEOUT_MS = 10000U;
+constexpr float HOME_M2006_OVERSHOOT_RAD = 0.261799388f; // Stop if >15 deg past target.
+constexpr bool HOME_HOLD_AFTER_DONE = true; // Hold M2006 only; GM6020 released after seating.
+
+constexpr unsigned HOME_READY_TIMEOUT_MS = 5000U;
+constexpr unsigned HOME_FEEDBACK_TIMEOUT_MS = 100U;
+constexpr unsigned HOME_MAX_STEP_MS = 10U;
+constexpr unsigned HOME_CAN_INTERVAL_MS = 5U;
+constexpr unsigned HOME_COMMAND_TIMEOUT_MS = 20U;
+constexpr float HOME_OVERSPEED_RAD_S = 2.0f;
+static_assert(HOME_PITCH_ID == 2U && HOME_M2006_ID == 1U, "Homing ID mapping changed");
+static_assert(HOME_M2006_RATIO > 0.0f && HOME_PITCH_RATIO > 0.0f, "Invalid home ratios");
+static_assert((HOME_PITCH_DIRECTION == 1.0f || HOME_PITCH_DIRECTION == -1.0f) &&
+              (HOME_M2006_DIRECTION == 1.0f || HOME_M2006_DIRECTION == -1.0f), "Invalid home direction");
+static_assert(HOME_PITCH_STALL_TORQUE_NM > 0.0f &&
+              HOME_PITCH_STALL_TORQUE_NM <= HOME_PITCH_MAX_TORQUE_NM,
+              "Stall threshold exceeds available torque");
+static_assert(HOME_PITCH_STALL_MS > HOME_FEEDBACK_TIMEOUT_MS && HOME_CAN_INTERVAL_MS > 0U &&
+              HOME_COMMAND_TIMEOUT_MS > HOME_CAN_INTERVAL_MS, "Invalid home timing");
+
 // GY-56 receive test: physical 3-pin UART1 = USART6.
 constexpr bool INFRARED_PLOT_TEST = false;
 constexpr bool INFRARED_PLOT_RAW_FIELDS = true;   // 8 channels; false restores 4.
@@ -124,7 +177,7 @@ constexpr bool FOLLOW_ENFORCE_ANGLE_LIMITS = false;
 // 时间缩放：1 = 原始 680 ms 周期（最快）；2/4 = 放慢并同时降低速度、加速度。
 constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 2U;  // 1360 ms/圈（缩放 4 已验证 OK，提速一档）
 constexpr bool FOLLOW_START_ENABLED =
-  true;  // Start yaw tracking after fresh feedback and pose capture.
+  false;  // Start yaw tracking after fresh feedback and pose capture.
 constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE = true;  // 上电自动记录初始姿态
 constexpr bool FOLLOW_USE_RC_STOP = false;               // 用遥控器右拨杆下档急停
 
@@ -209,6 +262,30 @@ constexpr bool FOLLOW_PITCH_CONFIGURED = true;
 
 // 微分滤波时间常数（当前 Kd = 0，保留以便以后启用）
 constexpr float FOLLOW_D_FILTER_S = 0.05f;
+
+// ---- 上电找零（撞挡块 → 回退固定角度 → 该位置作为起始角）----
+// 流程：恒力矩朝一个方向慢转 → 角速度≈0 持续 STALL_MS 判定顶到挡块
+//       → 反向走 BACKOFF_RAD → 停稳 SETTLE_MS → 捕捉参考零点并进入跟随
+// 第一次方向超时会自动换反方向重试；两个方向都超时 → 报故障、不出力矩。
+constexpr bool FOLLOW_HOMING_ENABLED = true;
+// 单轴找零开关：yaw 用绝对编码器/相对起点，不需要撞挡块；只给 pitch 找零
+constexpr bool FOLLOW_YAW_HOMING_ENABLED = false;
+constexpr bool FOLLOW_PITCH_HOMING_ENABLED = true;
+constexpr float FOLLOW_HOMING_TORQUE_NM = 0.15f;          // yaw 试探力矩
+constexpr float FOLLOW_HOMING_PITCH_TORQUE_NM = 0.30f;    // pitch 试探力矩需大于重力矩
+constexpr float FOLLOW_HOMING_STALL_SPEED_RAD_S = 0.06f;  // 判定"停转"的速度阈值
+constexpr unsigned FOLLOW_HOMING_STALL_MS = 200U;         // 停转持续多久算顶到挡块
+constexpr unsigned FOLLOW_HOMING_TIMEOUT_MS = 4000U;      // 单个方向最长找零时间
+constexpr float FOLLOW_HOMING_BACKOFF_RAD = 0.5236f;      // 顶到挡块后回退的角度（30°）
+// 回退段力矩 = 启动力矩前馈 + 位置P - 速度D。启动力矩必须大于云台的静摩擦+重力，
+// 否则会像之前那样：顶到挡块后 0.09 N·m 推不动，卡在原地不动。
+constexpr float FOLLOW_HOMING_BACKOFF_FF_NM = 0.20f;      // 启动力矩前馈（脱离挡块用）
+constexpr float FOLLOW_HOMING_POS_KP = 1.5f;              // 回退段位置增益 N·m/rad
+constexpr float FOLLOW_HOMING_POS_KD = 0.10f;             // 回退段阻尼 N·m/(rad/s)（30 度行程需更大阻尼）
+constexpr float FOLLOW_HOMING_MAX_TORQUE_NM = 0.45f;      // 回退段力矩上限
+constexpr float FOLLOW_HOMING_TOLERANCE_RAD = 0.01f;      // 回退到位判定
+constexpr unsigned FOLLOW_HOMING_SETTLE_MS = 100U;        // 到位后稳定确认时间
+constexpr unsigned FOLLOW_HOMING_BACKOFF_TIMEOUT_MS = 3000U;  // 回退超时（推不动就报错）
 
 // ---- 绘图 ----
 // 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw 2通道，双轴4通道），

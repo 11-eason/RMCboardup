@@ -58,6 +58,7 @@ osThreadId fold_taskHandle;
 osThreadId auto_taskHandle;
 osThreadId trajectory_taskHandle;
 osThreadId trajectory_followHandle;
+osThreadId homingHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -75,6 +76,7 @@ void StartFoldTAsk(void const * argument);
 void StartAutoTask(void const * argument);
 void StartTrajectoryTask(void const * argument);
 void StartTrajectoryFollow(void const * argument);
+void StartTask12(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -165,6 +167,10 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of trajectory_follow */
   osThreadDef(trajectory_follow, StartTrajectoryFollow, osPriorityNormal, 0, 256);
   trajectory_followHandle = osThreadCreate(osThread(trajectory_follow), NULL);
+
+  /* definition and creation of homing */
+  osThreadDef(homing, StartTask12, osPriorityNormal, 0, 256);
+  homingHandle = osThreadCreate(osThread(homing), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -350,9 +356,27 @@ void StartTrajectoryTask(void const * argument)
 void StartTrajectoryFollow(void const * argument)
 {
   /* USER CODE BEGIN StartTrajectoryFollow */
-  extern void trajectory_follow_task(void const * argument);
-  trajectory_follow_task(argument);
+  extern void gimbal_homing_task(void const * argument);
+  gimbal_homing_task(argument);
   /* USER CODE END StartTrajectoryFollow */
+}
+
+/* USER CODE BEGIN Header_StartTask12 */
+/**
+* @brief Function implementing the homing thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask12 */
+void StartTask12(void const * argument)
+{
+  /* USER CODE BEGIN StartTask12 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartTask12 */
 }
 
 /* Private application code --------------------------------------------------*/
