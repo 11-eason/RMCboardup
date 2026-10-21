@@ -252,84 +252,6 @@ void latch_fault(uint8_t code)
   taskEXIT_CRITICAL();
 }
 
-// ================= 上电找零状态机 =================
-// 每个轴独立：恒力矩顶挡块 → 检测停转 → 反向回退固定角度 → 停稳 → 完成
-struct HomingAxis {
-  uint8_t phase = 0;  // 0=正方向试探 1=反方向试探 2=回退 3=完成 4=失败
-  float dir = 1.0f;
-  float target_angle = 0.0f;
-  uint32_t stall_ms = 0;
-  uint32_t timer_ms = 0;
-  uint32_t settle_ms = 0;
-};
-
-HomingAxis homing_yaw;
-HomingAxis homing_pitch;
-bool homing_finished = false;
-
-// 返回 true 表示该轴找零已结束（成功或失败）
-bool homing_axis_step(HomingAxis & h, float angle, float speed, float dt_ms, float seek_torque,
-                      float & torque)
-{
-  torque = 0.0f;
-  switch (h.phase) {
-    case 0:
-    case 1: {
-      torque = h.dir * seek_torque;
-      h.timer_ms += static_cast<uint32_t>(dt_ms);
-      if (std::fabs(speed) < control_constants::FOLLOW_HOMING_STALL_SPEED_RAD_S)
-        h.stall_ms += static_cast<uint32_t>(dt_ms);
-      else
-        h.stall_ms = 0;
-      if (h.stall_ms >= control_constants::FOLLOW_HOMING_STALL_MS) {
-        // 顶到挡块：回退固定角度作为起始位
-        h.target_angle = angle - h.dir * control_constants::FOLLOW_HOMING_BACKOFF_RAD;
-        h.settle_ms = 0;
-        h.phase = 2;
-      }
-      else if (h.timer_ms >= control_constants::FOLLOW_HOMING_TIMEOUT_MS) {
-        if (h.phase == 0) {
-          h.dir = -h.dir;
-          h.phase = 1;
-          h.timer_ms = 0;
-          h.stall_ms = 0;
-        }
-        else {
-          h.phase = 4;  // 两个方向都没找到挡块 → 失败
-        }
-      }
-      return false;
-    }
-    case 2: {
-      const float error = h.target_angle - angle;
-      // 启动力矩前馈：误差明显时先给足力矩脱离挡块/静摩擦，接近目标时撤掉防止冲过
-      const bool far = std::fabs(error) > 2.0f * control_constants::FOLLOW_HOMING_TOLERANCE_RAD;
-      const float feedforward = far ? (error > 0.0f ? 1.0f : -1.0f) *
-                                          control_constants::FOLLOW_HOMING_BACKOFF_FF_NM :
-                                     0.0f;
-      torque = clamp(
-        feedforward + control_constants::FOLLOW_HOMING_POS_KP * error -
-          control_constants::FOLLOW_HOMING_POS_KD * speed,
-        -control_constants::FOLLOW_HOMING_MAX_TORQUE_NM,
-        control_constants::FOLLOW_HOMING_MAX_TORQUE_NM);
-      const bool arrived =
-        std::fabs(error) < control_constants::FOLLOW_HOMING_TOLERANCE_RAD && std::fabs(speed) < 0.2f;
-      h.settle_ms = arrived ? h.settle_ms + static_cast<uint32_t>(dt_ms) : 0;
-      h.timer_ms += static_cast<uint32_t>(dt_ms);
-      if (h.settle_ms >= control_constants::FOLLOW_HOMING_SETTLE_MS) {
-        h.phase = 3;
-        torque = 0.0f;
-        return true;
-      }
-      if (h.timer_ms >= control_constants::FOLLOW_HOMING_BACKOFF_TIMEOUT_MS) h.phase = 4;  // 推不动
-      return false;
-    }
-    default:
-      torque = 0.0f;
-      return true;
-  }
-}
-
 void step(
   const TrajectoryPoint & target, const Feedback & f, bool run, uint32_t now, float dt,
   uint32_t phase_ms, bool rc_stop)
@@ -374,53 +296,6 @@ void step(
               control_constants::FOLLOW_YAW.max_output);
       result.yaw.speed_command_rad_s = 0.0f;
       result.active = true;
-    } else if (control_constants::FOLLOW_HOMING_ENABLED && !homing_finished) {
-      // 找零阶段：优先于跟随。两轴同时进行，互不影响。
-      const float dt_ms = dt * 1000.0f;
-      float torque_yaw = 0.0f;
-      float torque_pitch = 0.0f;
-      // yaw 不找零：直接视为已完成，只输出 pitch 的找零力矩
-      const bool done_yaw = control_constants::FOLLOW_YAW_HOMING_ENABLED ?
-        homing_axis_step(
-          homing_yaw, f.yaw.angle_rad, f.yaw.speed_rad_s, dt_ms,
-          control_constants::FOLLOW_HOMING_TORQUE_NM, torque_yaw) :
-        true;
-      bool done_pitch = true;
-      if (control_constants::FOLLOW_PITCH_HOMING_ENABLED && !control_constants::FOLLOW_SINGLE_YAW)
-        done_pitch = homing_axis_step(
-          homing_pitch, f.pitch.angle_rad, f.pitch.speed_rad_s, dt_ms,
-          control_constants::FOLLOW_HOMING_PITCH_TORQUE_NM, torque_pitch);
-      reset_axis(yaw_state);
-      reset_axis(pitch_state);
-      result.yaw.control_output = torque_yaw;
-      result.pitch.control_output = control_constants::FOLLOW_SINGLE_YAW ? 0.0f : torque_pitch;
-      result.yaw.speed_command_rad_s = 0.0f;
-      result.pitch.speed_command_rad_s = 0.0f;
-      result.active = true;
-      result.homing = true;  // 标记找零阶段：跳过跟踪误差保护
-      if (done_yaw && done_pitch) {
-        homing_finished = true;
-        // 只有"启用了找零的轴"才要求成功；未启用的轴直接跳过
-        const bool yaw_ok =
-          !control_constants::FOLLOW_YAW_HOMING_ENABLED || homing_yaw.phase == 3;
-        const bool pitch_ok =
-          !(control_constants::FOLLOW_PITCH_HOMING_ENABLED &&
-            !control_constants::FOLLOW_SINGLE_YAW) ||
-          homing_pitch.phase == 3;
-        if (yaw_ok && pitch_ok) {
-          yaw_origin = f.yaw.angle_rad;
-          pitch_origin = f.pitch.angle_rad;
-          initial_pose_captured = true;
-          capture_requested = false;
-        }
-        else {
-          latch_fault(FAULT_CONFIG);  // 找零失败（两个方向都没撞到挡块）
-        }
-      }
-      taskENTER_CRITICAL();
-      latest = result;
-      taskEXIT_CRITICAL();
-      return;
     } else {
       result.yaw =
         update_axis(yaw_state, control_constants::FOLLOW_YAW, f.yaw, target.yaw, target.yaw_vel,
@@ -471,10 +346,6 @@ void set_enabled(bool value)
     command_active = false;
     requested_yaw_torque = 0.0f;
     requested_pitch_torque = 0.0f;
-    // 停机后重新开始，找零也要重来（保证每次进入都是同一个起点）
-    homing_yaw = HomingAxis{};
-    homing_pitch = HomingAxis{};
-    homing_finished = false;
   }
   taskEXIT_CRITICAL();
 }
@@ -668,27 +539,20 @@ void run()
     // 跟踪误差保护：参考与实际偏差过大且持续，就停机锁存，避免越追越飞
     if (tracking) {
       const Result state = read();
-      if (state.homing) {
-        // 找零阶段：离轨迹目标很远是正常的，不做跟踪误差保护
-        yaw_error_ms = 0;
-        pitch_error_ms = 0;
-      }
-      else {
-        yaw_error_ms = std::fabs(state.yaw.angle_error_rad) >
-                           control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD
-                         ? yaw_error_ms + delta
+      yaw_error_ms = std::fabs(state.yaw.angle_error_rad) >
+                         control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD
+                       ? yaw_error_ms + delta
+                       : 0U;
+      pitch_error_ms = (!control_constants::FOLLOW_SINGLE_YAW &&
+                        std::fabs(state.pitch.angle_error_rad) >
+                          control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD)
+                         ? pitch_error_ms + delta
                          : 0U;
-        pitch_error_ms = (!control_constants::FOLLOW_SINGLE_YAW &&
-                          std::fabs(state.pitch.angle_error_rad) >
-                            control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD)
-                           ? pitch_error_ms + delta
-                           : 0U;
-        if (yaw_error_ms >= control_constants::FOLLOW_TRACKING_ERROR_MS ||
-            pitch_error_ms >= control_constants::FOLLOW_TRACKING_ERROR_MS) {
-          set_enabled(false);
-          latch_fault(FAULT_TRACKING_ERROR);
-          tracking = false;
-        }
+      if (yaw_error_ms >= control_constants::FOLLOW_TRACKING_ERROR_MS ||
+          pitch_error_ms >= control_constants::FOLLOW_TRACKING_ERROR_MS) {
+        set_enabled(false);
+        latch_fault(FAULT_TRACKING_ERROR);
+        tracking = false;
       }
     }
 

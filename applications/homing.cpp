@@ -28,15 +28,24 @@ struct PI {
     return clamp(kp*error+integral,-limit,limit);
   }
 };
-struct Feedback { float pa,ps,pt,ma,ms; bool fresh; };
+struct Feedback { float pa,ps,pt,ma,ms,mt; bool fresh; };
 struct Controller {
   Status out={};
   PI pitch_pi, m_pi;
   uint32_t entered=0, stall_since=0, settled_since=0;
-  bool stall_active=false, settle_active=false;
-  float pitch_start=0.0f, stall_angle=0.0f, m_origin=0.0f;
+  uint32_t pitch_os_since=0, m_os_since=0;  // 超速去抖计时
+  uint32_t done_since=0;  // Done 阶段计时，用于 500ms 后锁定
+  bool locked=false;
+  float m2006_home_target=0.0f;      // M2006 最终转动目标
+  bool m2006_home_armed=false, m2006_home_done=false;
+  uint32_t m2006_home_since=0;
+  bool stall_active=false, settle_active=false, seek_motion_seen=false;
+  float pitch_start=0.0f, stall_angle=0.0f, m_origin=0.0f, pitch_return_origin=0.0f;
   float pitch_speed_cmd=0.0f, m_speed_cmd=0.0f;
+
   void fault(Fault f) {
+    out.fault_pitch_speed_rad_s=out.pitch_speed_rad_s;
+    out.fault_m2006_speed_rad_s=out.m2006_speed_rad_s;
     out.stage=Stage::Fault;out.fault=f;out.homed=false;
     out.pitch_torque_nm=out.m2006_torque_nm=0.0f;
     pitch_pi={};m_pi={};
@@ -49,81 +58,203 @@ struct Controller {
       c::HOME_PITCH_MAX_TORQUE_NM<=sp::GM6020_MAX_TORQUE &&
       c::HOME_M2006_MAX_TORQUE_NM>0.0f &&
       c::HOME_M2006_MAX_TORQUE_NM<=sp::M2006_P36_MAX_TORQUE &&
-      c::HOME_PITCH_MAX_TRAVEL_RAD>0.0f && c::HOME_M2006_MOVE_RAD>0.0f &&
-      c::HOME_PITCH_SEEK_SPEED_RAD_S>0.0f && c::HOME_M2006_MAX_SPEED_RAD_S>0.0f;
+      c::HOME_PITCH_MAX_TRAVEL_RAD>0.0f && c::HOME_PITCH_RETURN_MOVE_RAD>0.0f &&
+      c::HOME_PITCH_SEEK_SPEED_RAD_S>0.0f && c::HOME_M2006_MAX_SPEED_RAD_S>0.0f &&
+      c::HOME_PITCH_RETURN_MAX_TORQUE_NM<=sp::GM6020_MAX_TORQUE &&
+      c::HOME_PITCH_HOLD_MAX_TORQUE_NM<=sp::GM6020_MAX_TORQUE;
     if (!config) fault(Fault::Config);
   }
   void step(const Feedback & f,uint32_t now,float dt) {
     out.stamp_ms=now;out.feedback_fresh=f.fresh;
     out.pitch_angle_rad=f.pa;out.m2006_relative_rad=f.ma-m_origin;
+    out.pitch_return_relative_rad=f.pa-pitch_return_origin;
+    out.pitch_feedback_torque_nm=f.pt;out.m2006_feedback_torque_nm=f.mt;
+    out.pitch_speed_rad_s=f.ps;out.m2006_speed_rad_s=f.ms;
+    out.stall_elapsed_ms=0;
     out.pitch_torque_nm=out.m2006_torque_nm=0.0f;
     if (out.stage==Stage::Idle || out.stage==Stage::Fault) return;
     if (out.stage==Stage::WaitFeedback) {
       if (!f.fresh) { if (now-entered>=c::HOME_READY_TIMEOUT_MS) fault(Fault::Feedback); return; }
-      pitch_start=f.pa;m_origin=f.ma;entered=now;
+      pitch_start=f.pa;m_origin=f.ma;pitch_return_origin=f.pa;entered=now;
+      out.pitch_return_relative_rad=0.0f;
       out.stage=Stage::SeekPitch;
     }
     if (!f.fresh) { fault(Fault::Feedback);return; }
     if (!std::isfinite(f.pa)||!std::isfinite(f.ps)||!std::isfinite(f.pt)||
-        !std::isfinite(f.ma)||!std::isfinite(f.ms)) { fault(Fault::Feedback);return; }
+        !std::isfinite(f.ma)||!std::isfinite(f.ms)||!std::isfinite(f.mt)) { fault(Fault::Feedback);return; }
     if (dt<=0.0f || dt>c::HOME_MAX_STEP_MS*0.001f) { fault(Fault::Timing);return; }
-    if (std::fabs(f.ps)>c::HOME_OVERSPEED_RAD_S || std::fabs(f.ms)>c::HOME_OVERSPEED_RAD_S) {
-      fault(Fault::Overspeed);return;
+    // 超速判据加 50 ms 去抖：硬挡块撞击或连杆耦合会产生单帧差分尖峰，
+    // 单帧即停机会把"正常撞击"误判成超速。
+    constexpr uint32_t kOverspeedDebounceMs=50U;
+    if (std::fabs(f.ps)>c::HOME_OVERSPEED_RAD_S) { if (!pitch_os_since) pitch_os_since=now; }
+    else pitch_os_since=0;
+    if (std::fabs(f.ms)>c::HOME_OVERSPEED_RAD_S) { if (!m_os_since) m_os_since=now; }
+    else m_os_since=0;
+    if (pitch_os_since && now-pitch_os_since>=kOverspeedDebounceMs) {
+      fault(Fault::PitchOverspeed);return;
+    }
+    if (m_os_since && now-m_os_since>=kOverspeedDebounceMs) {
+      fault(Fault::M2006Overspeed);return;
     }
     if (out.stage==Stage::SeekPitch) {
-      if (now-entered>=c::HOME_PITCH_TIMEOUT_MS) {fault(Fault::SeekTimeout);return;}
+      const float progress=c::HOME_PITCH_DIRECTION*(f.pa-pitch_start);
+      if (progress>=c::HOME_PITCH_MIN_SEEK_TRAVEL_RAD) seek_motion_seen=true;
+      if (now-entered>=c::HOME_PITCH_TIMEOUT_MS) {
+        if (!seek_motion_seen) fault(Fault::NoSeekMotion);
+        else fault(Fault::SeekTimeout);
+        return;
+      }
       if (std::fabs(f.pa-pitch_start)>c::HOME_PITCH_MAX_TRAVEL_RAD) {fault(Fault::SeekTravel);return;}
       const float target=c::HOME_PITCH_DIRECTION*c::HOME_PITCH_SEEK_SPEED_RAD_S;
       const float dv=c::HOME_TARGET_ACCEL_RAD_S2*dt;
       pitch_speed_cmd+=clamp(target-pitch_speed_cmd,-dv,dv);
       out.pitch_torque_nm=pitch_pi.step(pitch_speed_cmd,f.ps,c::HOME_PITCH_SPEED_KP,
         c::HOME_PITCH_SPEED_KI,c::HOME_PITCH_MAX_TORQUE_NM,dt);
-      const bool candidate=now-entered>=c::HOME_PITCH_STARTUP_BLANK_MS &&
-        std::fabs(f.ps)<=c::HOME_PITCH_STALL_SPEED_RAD_S &&
-        c::HOME_PITCH_DIRECTION*f.pt>=c::HOME_PITCH_STALL_TORQUE_NM &&
+      // 判定"顶到挡块"只用：已产生过位移 + 速度≈0 + 指令力矩够大。
+      // 不再依赖反馈力矩 f.pt：6020 在堵转时上报的电流/力矩受采样和限幅影响，
+      // 出现"实际顶住了但 f.pt 达不到阈值"时会导致 stall 永远不成立、一直顶到超时。
+      // 判定"顶到挡块"只靠：已产生过位移 + 指令力矩够大。
+      // 不能用速度做条件：顶住挡块嗡嗡震动时编码器速度会来回跳，导致 stall 计时
+      // 每帧被清零、永远凑不满 STALL_MS。真正的"没在动"由下面的位移判据保证。
+      const bool candidate=seek_motion_seen && now-entered>=c::HOME_PITCH_STARTUP_BLANK_MS &&
         c::HOME_PITCH_DIRECTION*out.pitch_torque_nm>=c::HOME_PITCH_STALL_TORQUE_NM;
       if (!candidate) stall_active=false;
       else {
         if (!stall_active || std::fabs(f.pa-stall_angle)>c::HOME_PITCH_STALL_TRAVEL_RAD) {
           stall_active=true;stall_since=now;stall_angle=f.pa;
         }
-        if (now-stall_since>=c::HOME_PITCH_STALL_MS) {
-          // Seat reached: release GM6020 BEFORE starting the other mechanism.
-          out.pitch_torque_nm=0.0f;pitch_pi={};
-          m_origin=f.ma;out.m2006_relative_rad=0.0f;
-          out.m2006_target_relative_rad=c::HOME_M2006_DIRECTION*c::HOME_M2006_MOVE_RAD;
-          out.stage=Stage::MoveM2006;entered=now;m_pi={};m_speed_cmd=0.0f;
+        out.stall_elapsed_ms=now-stall_since;
+        if (out.stall_elapsed_ms>=c::HOME_PITCH_STALL_MS) {
+          // Remove seek current, then reverse THIS GM6020; M2006 stays released.
+          out.pitch_torque_nm=0.0f;pitch_pi={};pitch_speed_cmd=0.0f;
+          pitch_return_origin=f.pa;m_origin=f.ma;
+          out.pitch_return_relative_rad=0.0f;out.m2006_relative_rad=0.0f;
+          out.pitch_return_target_relative_rad=-c::HOME_PITCH_DIRECTION*c::HOME_PITCH_RETURN_MOVE_RAD;
+          out.stage=Stage::MovePitch;entered=now;m_pi={};m_speed_cmd=0.0f;
         }
       }
       return; // M2006 remains zero for this entire phase.
     }
-    if (out.stage==Stage::MoveM2006 || out.stage==Stage::Done) {
-      const float delta=f.ma-m_origin;
-      const float target=c::HOME_M2006_DIRECTION*c::HOME_M2006_MOVE_RAD;
-      out.m2006_relative_rad=delta;out.m2006_target_relative_rad=target;
-      if (out.stage==Stage::Done && !c::HOME_HOLD_AFTER_DONE) return;
-      if (out.stage==Stage::MoveM2006 && now-entered>=c::HOME_M2006_TIMEOUT_MS) {
-        fault(Fault::MoveTimeout);return;
+    if (out.stage==Stage::MovePitch || out.stage==Stage::Done) {
+      const float delta=f.pa-pitch_return_origin;
+      const float target=-c::HOME_PITCH_DIRECTION*c::HOME_PITCH_RETURN_MOVE_RAD;
+      out.pitch_return_relative_rad=delta;out.pitch_return_target_relative_rad=target;
+      if (out.stage==Stage::MovePitch && now-entered>=c::HOME_PITCH_RETURN_TIMEOUT_MS) {
+        // Timeout fallback: if the mechanism already got close to the 30 deg target
+        // (mechanical travel may simply be shorter), lock the ACHIEVED position as the
+        // zero instead of faulting. Only a large miss is a real failure.
+        if (std::fabs(target-delta)<=0.087266463f) {  // 5 deg
+          out.stage=Stage::Done;out.homed=true;
+          out.pitch_zero_rad=pitch_return_origin+target;
+          out.m2006_zero_rad=f.ma;
+          pitch_speed_cmd=0.0f;m_pi={};m_speed_cmd=0.0f;
+        }
+        else {
+          fault(Fault::MoveTimeout);
+        }
+        return;
       }
-      if (std::fabs(delta)>c::HOME_M2006_MOVE_RAD+c::HOME_M2006_OVERSHOOT_RAD) {
+      // ONLY during the return. In Done the M2006 second-stage rotation drags the 6020
+      // through the linkage, so this displacement is expected and must not fault.
+      if (out.stage!=Stage::Done &&
+          std::fabs(delta)>c::HOME_PITCH_RETURN_MOVE_RAD+c::HOME_PITCH_RETURN_OVERSHOOT_RAD) {
         fault(Fault::MoveOvershoot);return;
       }
-      const float error=target-delta;
-      const float wanted=clamp(c::HOME_M2006_POSITION_KP*error,
-        -c::HOME_M2006_MAX_SPEED_RAD_S,c::HOME_M2006_MAX_SPEED_RAD_S);
+      const bool holding=out.stage==Stage::Done;
+      if (holding && !c::HOME_HOLD_AFTER_DONE) return;
+      // Allow multiple zero-current CAN frames before applying reverse torque.
+      if (!holding && now-entered<c::HOME_PITCH_RETURN_RELEASE_MS) return;
+
+      if (holding && !locked) {
+        // Stage 4 has been held for HOME_LOCK_MS -> freeze the achieved pose as the zero.
+        if (!done_since) done_since=now;
+        else if (now-done_since>=c::HOME_LOCK_MS) {
+          out.pitch_zero_rad=f.pa;
+          out.m2006_zero_rad=f.ma;
+          locked=true;
+        }
+      }
+      const float position_goal=holding ? out.pitch_zero_rad : pitch_return_origin+target;
+      const float position_kp=holding ? c::HOME_PITCH_HOLD_POSITION_KP : c::HOME_PITCH_RETURN_POSITION_KP;
+      const float speed_limit=holding ? c::HOME_PITCH_HOLD_MAX_SPEED_RAD_S : c::HOME_PITCH_RETURN_MAX_SPEED_RAD_S;
+      // Deadband: inside 4 deg, command zero speed (pure damping). No position correction,
+      // so the loop cannot hunt back and forth around the recorded zero.
+      const float err_p=position_goal-f.pa;
+      const float wanted=(holding && std::fabs(err_p)<c::HOME_PITCH_HOLD_DEADBAND_RAD) ?
+        0.0f : clamp(position_kp*err_p,-speed_limit,speed_limit);
       const float dv=c::HOME_TARGET_ACCEL_RAD_S2*dt;
-      m_speed_cmd+=clamp(wanted-m_speed_cmd,-dv,dv);
+      pitch_speed_cmd+=clamp(wanted-pitch_speed_cmd,-dv,dv);
+      out.pitch_torque_nm=pitch_pi.step(pitch_speed_cmd,f.ps,
+        holding ? c::HOME_PITCH_HOLD_SPEED_KP : c::HOME_PITCH_RETURN_SPEED_KP,
+        holding ? c::HOME_PITCH_HOLD_SPEED_KI : c::HOME_PITCH_RETURN_SPEED_KI,
+        holding ? c::HOME_PITCH_HOLD_MAX_TORQUE_NM : c::HOME_PITCH_RETURN_MAX_TORQUE_NM,dt);
+
+      if (!holding) {
+        // Settle test is POSITION ONLY. During the return the M2006 follows the 6020 and
+        // the linkage couples them, so both speed readings keep jittering; requiring a
+        // low speed never becomes true and the return would always time out.
+        const bool settled=std::fabs(target-delta)<=c::HOME_PITCH_RETURN_TOLERANCE_RAD;
+        // First time the position error enters the band -> latch Done immediately.
+        // No dwell time, so the controller does not keep making small corrections.
+        if (settled) {
+          out.stage=Stage::Done;out.homed=true;
+          out.pitch_zero_rad=pitch_return_origin+target;out.m2006_zero_rad=f.ma;
+          // Keep the GM6020 load integral; capture M2006 ONLY at the final pose.
+          pitch_speed_cmd=0.0f;m_pi={};m_speed_cmd=0.0f;
+          if (!c::HOME_HOLD_AFTER_DONE) out.pitch_torque_nm=0.0f;
+        }
+        // M2006 随 6020 转速成比例运动：不锁死（仍可动），但不让重力把
+        // 总成拖回挡块。FOLLOW=0 时退化为原来的“零力矩”行为。
+        const float follow_target = c::HOME_M2006_RETURN_FOLLOW * f.ps;
+        m_speed_cmd += clamp(follow_target - m_speed_cmd, -dv, dv);
+        out.m2006_torque_nm = m_pi.step(m_speed_cmd, f.ms, c::HOME_M2006_SPEED_KP,
+          c::HOME_M2006_SPEED_KI, c::HOME_M2006_MAX_TORQUE_NM, dt);
+        return;
+      }
+
+      // ---- M2006 第二段归零 ----
+      // 6020 锁定后，M2006 再转 HOME_M2006_FINAL_ROT_RAD（30°），到位后该位置就是最终零点。
+      // 周期、限速、PI 都复用 6020 已验证的那套。
+      if (locked && !m2006_home_done) {
+        if (!m2006_home_armed) {
+          m2006_home_armed=true;
+          m2006_home_since=now;
+          m2006_home_target=f.ma+c::HOME_M2006_FINAL_ROT_RAD*c::HOME_M2006_FINAL_ROT_DIR;
+        }
+        // Timeout fallback: if the axis cannot reach the full rotation (mechanical travel
+        // short, or blocked), accept the achieved position instead of pushing forever.
+        if (now-m2006_home_since>=6000U) {
+          m2006_home_done=true;
+          out.m2006_zero_rad=f.ma;
+          return;
+        }
+        const float err_home=m2006_home_target-f.ma;
+        const float wanted_home=clamp(c::HOME_M2006_POSITION_KP*err_home,
+          -c::HOME_M2006_MAX_SPEED_RAD_S,c::HOME_M2006_MAX_SPEED_RAD_S);
+        m_speed_cmd+=clamp(wanted_home-m_speed_cmd,-dv,dv);
+        const float pi_home=m_pi.step(m_speed_cmd,f.ms,c::HOME_M2006_SPEED_KP,
+          c::HOME_M2006_SPEED_KI,c::HOME_M2006_MAX_TORQUE_NM,dt);
+        // Breakaway feedforward: position->speed->torque starts at only
+        // 0.10 x 0.35 = 0.035 Nm, which cannot overcome the M2006 static friction.
+        // Push directly in the direction of the remaining error until close to target.
+        const float ff_home=(std::fabs(err_home)>(2.0f*c::HOME_M2006_FINAL_TOL_RAD)) ?
+          ((err_home>0.0f ? 1.0f : -1.0f)*0.25f) : 0.0f;
+        out.m2006_torque_nm=clamp(ff_home+pi_home,
+          -c::HOME_M2006_MAX_TORQUE_NM,c::HOME_M2006_MAX_TORQUE_NM);
+        if (std::fabs(err_home)<=c::HOME_M2006_FINAL_TOL_RAD) {
+          m2006_home_done=true;
+          out.m2006_zero_rad=m2006_home_target;  // 以到位位置作为 M2006 零点
+        }
+        return;  // 6020 保持不受影响（已在上面算完）
+      }
+      // Deadband: passive inside the band so the two holds stop fighting.
+      const float err_m=out.m2006_zero_rad-f.ma;
+      const float wanted_m=std::fabs(err_m)>c::HOME_M2006_HOLD_DEADBAND_RAD ?
+        clamp(c::HOME_M2006_POSITION_KP*err_m,
+          -c::HOME_M2006_MAX_SPEED_RAD_S,c::HOME_M2006_MAX_SPEED_RAD_S) : 0.0f;
+      m_speed_cmd+=clamp(wanted_m-m_speed_cmd,-dv,dv);
       out.m2006_torque_nm=m_pi.step(m_speed_cmd,f.ms,c::HOME_M2006_SPEED_KP,
         c::HOME_M2006_SPEED_KI,c::HOME_M2006_MAX_TORQUE_NM,dt);
-      const bool settled=std::fabs(error)<=c::HOME_M2006_TOLERANCE_RAD &&
-                         std::fabs(f.ms)<=c::HOME_M2006_SETTLE_SPEED_RAD_S;
-      if (!settled) settle_active=false;
-      else if (!settle_active) {settle_active=true;settled_since=now;}
-      else if (out.stage==Stage::MoveM2006 && now-settled_since>=c::HOME_M2006_SETTLE_MS) {
-        out.stage=Stage::Done;out.homed=true;
-        out.pitch_zero_rad=f.pa;out.m2006_zero_rad=f.ma;
-        if (!c::HOME_HOLD_AFTER_DONE) out.m2006_torque_nm=0.0f;
-      }
     }
   }
 };
@@ -171,7 +302,7 @@ void run() {
     if (!elapsed) {wake=now;continue;}
     previous=now;
     taskENTER_CRITICAL();
-    const Feedback f={pitch.angle,pitch.speed,pitch.torque,m2006.angle,m2006.speed,
+    const Feedback f={pitch.angle,pitch.speed,pitch.torque,m2006.angle,m2006.speed,m2006.torque,
       pitch.is_open() && m2006.is_open() && now-pitch_stamp<c::HOME_FEEDBACK_TIMEOUT_MS &&
       now-m_stamp<c::HOME_FEEDBACK_TIMEOUT_MS};
     const bool go=start_requested, stop=stop_requested;

@@ -10,35 +10,72 @@ constexpr unsigned HOME_PITCH_ID = 2U;
 constexpr unsigned HOME_M2006_ID = 1U;
 constexpr float HOME_PITCH_RATIO = 1.0f;
 constexpr float HOME_M2006_RATIO = 36.0f;  // Output-shaft angle/speed/torque.
-constexpr float HOME_PITCH_DIRECTION = 1.0f;  // Assumed rearward = encoder-positive.
-constexpr float HOME_M2006_DIRECTION = -1.0f; // Reverse in M2006 encoder coordinates.
-constexpr float HOME_M2006_MOVE_RAD = 1.0471975512f;  // Mechanism/output shaft 60 deg.
+constexpr float HOME_PITCH_DIRECTION = 1.0f; // Observed positive motion approaches the rear stop.
 
 // Initial trial settings, not a mechanical rating or a tuned controller.
 constexpr float HOME_PITCH_SEEK_SPEED_RAD_S = 0.35f;
-constexpr float HOME_PITCH_SPEED_KP = 0.015f;
-constexpr float HOME_PITCH_SPEED_KI = 0.45f;
-constexpr float HOME_PITCH_MAX_TORQUE_NM = 0.18f;
-constexpr float HOME_PITCH_STALL_SPEED_RAD_S = 0.05f;
-constexpr float HOME_PITCH_STALL_TORQUE_NM = 0.10f; // Feedback AND commanded torque.
-constexpr float HOME_PITCH_STALL_TRAVEL_RAD = 0.008726646f; // <=0.5 deg / stall window.
-constexpr unsigned HOME_PITCH_STALL_MS = 400U;
+constexpr float HOME_PITCH_SPEED_KP = 0.08f;  // tau = J/Kp = 12.5ms（原 0.25 下 4ms，与 2ms 周期接近会自激）
+constexpr float HOME_PITCH_SPEED_KI = 0.45f;  // 与 hold 段一致
+constexpr float HOME_PITCH_MAX_TORQUE_NM = 0.40f;  // 顶挡块力矩：0.50 太高，硬顶会嗡嗡震动
+constexpr float HOME_PITCH_STALL_SPEED_RAD_S = 0.15f; // Tolerate +/-1 rpm CAN quantization; angle window still required.
+constexpr float HOME_PITCH_STALL_TORQUE_NM = 0.30f;  // stall 力矩阈值：比顶挡块力矩低 0.10 留余量 // Feedback AND commanded torque.
+constexpr float HOME_PITCH_STALL_TRAVEL_RAD = 0.05235988f;  // 3 deg：嘎噡震动的角度幅度可能超 0.5° // <=0.5 deg / stall window.
+// Startup stiction is NOT a reference. Rearward motion must be seen first.
+// If powered on against the stop, report NoSeekMotion instead of inventing zero.
+constexpr float HOME_PITCH_MIN_SEEK_TRAVEL_RAD = 0.087266463f; // 5 deg net rearward travel (must exceed stall gate).
+constexpr unsigned HOME_PITCH_STALL_MS = 300U;
 constexpr unsigned HOME_PITCH_STARTUP_BLANK_MS = 300U;
 constexpr unsigned HOME_PITCH_TIMEOUT_MS = 10000U;
 constexpr float HOME_PITCH_MAX_TRAVEL_RAD = 1.570796327f; // Software search cap 90 deg.
 
-constexpr float HOME_M2006_POSITION_KP = 4.0f;
-constexpr float HOME_M2006_SPEED_KP = 0.10f;
-constexpr float HOME_M2006_SPEED_KI = 0.20f;
-constexpr float HOME_M2006_MAX_TORQUE_NM = 0.30f;
-constexpr float HOME_M2006_MAX_SPEED_RAD_S = 0.35f;
+// After rear-stop detection, GM6020 reverses relative to its own seated angle.
+// M2006 remains zero-current until the GM6020 return is complete and stationary.
+constexpr float HOME_PITCH_RETURN_MOVE_RAD = 0.5235987756f; // GM6020 shaft 30 deg backoff. // GM6020 shaft 15 deg backoff.
+constexpr unsigned HOME_PITCH_RETURN_RELEASE_MS = 100U;   // Clear rearward current first.
+constexpr float HOME_PITCH_RETURN_POSITION_KP = 3.0f;
+constexpr float HOME_PITCH_RETURN_SPEED_KP = 0.08f;  // 同上，回退段不再自激
+constexpr float HOME_PITCH_RETURN_SPEED_KI = 0.45f;  // 同上
+constexpr float HOME_PITCH_RETURN_MAX_TORQUE_NM = 0.80f;
+constexpr float HOME_PITCH_RETURN_MAX_SPEED_RAD_S = 0.35f;
+constexpr unsigned HOME_PITCH_RETURN_TIMEOUT_MS = 8000U;
+// After entering Done, wait this long then freeze the ACHIEVED pose as the final zero
+// (stage 4 for 500 ms -> lock). No further fine correction of the zero point.
+constexpr unsigned HOME_LOCK_MS = 250U;
+// Hold deadband: inside this band the controller only damps (speed target 0)
+// and makes NO position correction, so the gimbal stops hunting.
+constexpr float HOME_PITCH_HOLD_DEADBAND_RAD = 0.06981317f;  // 4 deg  // lock 250 ms after entering Done
+// Second homing stage: after the 6020 locks, the M2006 rotates this much as its final zero.
+constexpr float HOME_M2006_FINAL_ROT_RAD = 0.5235987756f;  // 30 deg
+constexpr float HOME_M2006_FINAL_ROT_DIR = 1.0f;           // flipped: -1.0 pushed into a stop          // same sense as the 6020 return; flip to +1 if wrong           // +1 or -1; flip if it goes the wrong way
+constexpr float HOME_M2006_FINAL_TOL_RAD = 0.06981317f;   // 4 deg (no fine hunting)   // 1 deg arrival band  // 30 deg move needs more time  // fail fast instead of waiting 15 s
+constexpr float HOME_PITCH_RETURN_TOLERANCE_RAD = 0.034906585f;  // 2 deg settle band // 1 deg.
+constexpr float HOME_PITCH_RETURN_SETTLE_SPEED_RAD_S = 0.15f; // Tolerate 1 rpm quantization.
+constexpr unsigned HOME_PITCH_RETURN_SETTLE_MS = 250U;
+constexpr float HOME_PITCH_RETURN_OVERSHOOT_RAD = 0.261799388f; // 15 deg past target.
 constexpr float HOME_TARGET_ACCEL_RAD_S2 = 0.50f;
-constexpr float HOME_M2006_TOLERANCE_RAD = 0.017453293f; // 1 deg.
+
+// Final GM6020 hold uses the same 60-degree target; preserve its load integral.
+// M2006 captures and holds its ACTUAL final angle, without a separate 60-degree demand.
+constexpr bool HOME_HOLD_AFTER_DONE = true;
+constexpr float HOME_PITCH_HOLD_POSITION_KP = 3.0f;
+constexpr float HOME_PITCH_HOLD_SPEED_KP = 0.08f;
+constexpr float HOME_PITCH_HOLD_SPEED_KI = 0.45f;
+constexpr float HOME_PITCH_HOLD_MAX_SPEED_RAD_S = 0.25f;
+constexpr float HOME_PITCH_HOLD_MAX_TORQUE_NM = 0.80f;
+constexpr float HOME_M2006_POSITION_KP = 1.0f;  // lowered from 4.0: avoid fighting the 6020 hold
+constexpr float HOME_M2006_SPEED_KP = 0.10f;
+// 回退阶段: M2006 转速 = FOLLOW × 6020转速。不锁死（仍能动），但保持柄结构一致，
+// 避免 M2006 完全自由时重力把 pitch 总成拖回挡块。正负号决定方向，反了就改成负值。
+constexpr float HOME_M2006_RETURN_FOLLOW = -1.0f;  // flipped sign: try -1 first, then 0.5 / 2.0
+// Deadband for the M2006 hold: inside this error band the M2006 stays passive,
+// so it does not fight the 6020 through the linkage (removes the small oscillation).
+constexpr float HOME_M2006_HOLD_DEADBAND_RAD = 0.06981317f;  // 4 deg  // 0 = 关闭该功能
+constexpr float HOME_M2006_SPEED_KI = 0.40f;
+constexpr float HOME_M2006_MAX_TORQUE_NM = 0.45f; // HOLD only, never used during return.
+constexpr float HOME_M2006_MAX_SPEED_RAD_S = 0.35f;
 constexpr float HOME_M2006_SETTLE_SPEED_RAD_S = 0.05f;
-constexpr unsigned HOME_M2006_SETTLE_MS = 250U;
-constexpr unsigned HOME_M2006_TIMEOUT_MS = 10000U;
-constexpr float HOME_M2006_OVERSHOOT_RAD = 0.261799388f; // Stop if >15 deg past target.
-constexpr bool HOME_HOLD_AFTER_DONE = true; // Hold M2006 only; GM6020 released after seating.
+// Append torque diagnostics to the existing six homing plot channels.
+constexpr bool HOME_PLOT_TORQUES = true; // true: 10 float channels; false: original 6.
 
 constexpr unsigned HOME_READY_TIMEOUT_MS = 5000U;
 constexpr unsigned HOME_FEEDBACK_TIMEOUT_MS = 100U;
@@ -46,10 +83,27 @@ constexpr unsigned HOME_MAX_STEP_MS = 10U;
 constexpr unsigned HOME_CAN_INTERVAL_MS = 5U;
 constexpr unsigned HOME_COMMAND_TIMEOUT_MS = 20U;
 constexpr float HOME_OVERSPEED_RAD_S = 2.0f;
+static_assert(HOME_PITCH_HOLD_POSITION_KP > 0.0f && HOME_PITCH_HOLD_SPEED_KP > 0.0f &&
+              HOME_PITCH_HOLD_SPEED_KI >= 0.0f && HOME_PITCH_HOLD_MAX_SPEED_RAD_S > 0.0f &&
+              HOME_PITCH_HOLD_MAX_TORQUE_NM > 0.0f && HOME_PITCH_HOLD_MAX_TORQUE_NM <= 0.741f * 3.0f,
+              "Invalid pitch hold settings");
+static_assert(HOME_PITCH_RETURN_MOVE_RAD > 0.0f && HOME_PITCH_RETURN_TOLERANCE_RAD > 0.0f &&
+              HOME_PITCH_RETURN_POSITION_KP > 0.0f && HOME_PITCH_RETURN_SPEED_KP > 0.0f &&
+              HOME_PITCH_RETURN_SPEED_KI >= 0.0f && HOME_PITCH_RETURN_MAX_TORQUE_NM > 0.0f &&
+              HOME_PITCH_RETURN_MAX_TORQUE_NM <= 0.741f * 3.0f &&
+              HOME_PITCH_RETURN_MAX_SPEED_RAD_S > 0.0f &&
+              HOME_PITCH_RETURN_MAX_SPEED_RAD_S < HOME_OVERSPEED_RAD_S &&
+              HOME_PITCH_RETURN_SETTLE_SPEED_RAD_S > 0.0f && HOME_PITCH_RETURN_SETTLE_MS > 0U &&
+              HOME_PITCH_RETURN_OVERSHOOT_RAD > 0.0f &&
+              HOME_PITCH_RETURN_RELEASE_MS >= 2U * HOME_CAN_INTERVAL_MS &&
+              HOME_PITCH_RETURN_TIMEOUT_MS > HOME_PITCH_RETURN_RELEASE_MS,
+              "Invalid GM6020 return settings");
 static_assert(HOME_PITCH_ID == 2U && HOME_M2006_ID == 1U, "Homing ID mapping changed");
 static_assert(HOME_M2006_RATIO > 0.0f && HOME_PITCH_RATIO > 0.0f, "Invalid home ratios");
-static_assert((HOME_PITCH_DIRECTION == 1.0f || HOME_PITCH_DIRECTION == -1.0f) &&
-              (HOME_M2006_DIRECTION == 1.0f || HOME_M2006_DIRECTION == -1.0f), "Invalid home direction");
+static_assert(HOME_PITCH_DIRECTION == 1.0f || HOME_PITCH_DIRECTION == -1.0f, "Invalid home direction");
+static_assert(HOME_PITCH_MIN_SEEK_TRAVEL_RAD > HOME_PITCH_STALL_TRAVEL_RAD &&
+              HOME_PITCH_MIN_SEEK_TRAVEL_RAD < HOME_PITCH_MAX_TRAVEL_RAD,
+              "Invalid minimum rearward travel");
 static_assert(HOME_PITCH_STALL_TORQUE_NM > 0.0f &&
               HOME_PITCH_STALL_TORQUE_NM <= HOME_PITCH_MAX_TORQUE_NM,
               "Stall threshold exceeds available torque");
@@ -274,6 +328,9 @@ constexpr bool FOLLOW_PITCH_HOMING_ENABLED = true;
 constexpr float FOLLOW_HOMING_TORQUE_NM = 0.15f;          // yaw 试探力矩
 constexpr float FOLLOW_HOMING_PITCH_TORQUE_NM = 0.30f;    // pitch 试探力矩需大于重力矩
 constexpr float FOLLOW_HOMING_STALL_SPEED_RAD_S = 0.06f;  // 判定"停转"的速度阈值
+// 找零采用"限速爬行"而不是恒力矩：恒力矩在自由轴上会一直加速，0.1 秒就能冲到超速。
+constexpr float FOLLOW_HOMING_SEEK_SPEED_RAD_S = 0.60f;   // 找零爬行目标转速
+constexpr float FOLLOW_HOMING_SEEK_KP = 1.0f;             // 找零速度环增益 N·m/(rad/s)
 constexpr unsigned FOLLOW_HOMING_STALL_MS = 200U;         // 停转持续多久算顶到挡块
 constexpr unsigned FOLLOW_HOMING_TIMEOUT_MS = 4000U;      // 单个方向最长找零时间
 constexpr float FOLLOW_HOMING_BACKOFF_RAD = 0.5236f;      // 顶到挡块后回退的角度（30°）
@@ -291,7 +348,7 @@ constexpr unsigned FOLLOW_HOMING_BACKOFF_TIMEOUT_MS = 3000U;  // 回退超时（
 // 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw 2通道，双轴4通道），
 // 2 = 原始参考，3 = 底盘诊断（FL 目标速度 / 实际速度 / 力矩 / 静止释放标志），
 // 4 = 功率模型标定（Στω / Στ²×100 / Σω²÷20 / 实测功率）
-constexpr unsigned FOLLOW_PLOT_MODE = 1U;
+constexpr unsigned FOLLOW_PLOT_MODE = 5U;
 constexpr bool FOLLOW_YAW_DIAGNOSTICS = true;  // 当前：双轴反馈帧数诊断（查 pitch 电机是否在线）
 // 模式 1 画哪根轴：0 = yaw（目标/实际），1 = pitch（目标/实际）
 constexpr unsigned FOLLOW_PLOT_AXIS = 1U;
@@ -311,7 +368,7 @@ static_assert(
 static_assert(
   FOLLOW_TRAJECTORY_TIME_SCALE > 0U && FOLLOW_TRAJECTORY_TIME_SCALE <= 100U,
   "Invalid trajectory time scale");
-static_assert(FOLLOW_PLOT_MODE <= 4U, "Invalid plot mode");
+static_assert(FOLLOW_PLOT_MODE <= 5U, "Invalid plot mode");
 static_assert(
   FOLLOW_MAX_TRACKING_ERROR_RAD > 0.0f && FOLLOW_OVERSPEED_FACTOR > 1.0f,
   "Protection thresholds must be positive and above 1");

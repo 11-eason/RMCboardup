@@ -64,7 +64,6 @@ struct Result
   bool active;
   bool calibrated;
   bool rc_stop;
-  bool homing;  // true = 正在执行上电找零（此阶段不做跟踪误差保护）
   uint8_t fault;  // FAULT_*，停机原因，便于在曲线上定位
 };
 
