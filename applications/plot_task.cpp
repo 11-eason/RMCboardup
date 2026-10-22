@@ -8,7 +8,6 @@
 #include "homing.hpp"
 #include "pitch_start.hpp"
 #include "infrared_status.hpp"
-#include "shared_data.hpp"
 #include "io/plotter/plotter.hpp"
 #include "task.h"
 #include "trajectory_follow.hpp"
@@ -30,8 +29,50 @@ extern "C" void plot_task()
   for (;;) {
     osDelayUntil(&last_wake, 20);
     if (homing::selected() || pitch_start::selected()) {
-      // Homing/IR hardware test: one channel only, IR<=30 latch timer in ms.
-      plotter.plot(static_cast<float>(g_data.infrared_timer_ms));
+      // 两个模块的 Status 类型不同，用共同字段手工取值。
+      const bool use_home = homing::selected();
+      const auto hs = homing::snapshot();
+      const auto ps = pitch_start::snapshot();
+      const float picked_stage = use_home ? static_cast<float>(hs.stage) : static_cast<float>(ps.stage);
+      const float picked_pitch = use_home ? hs.pitch_angle_rad : ps.pitch_angle_rad;
+      const float picked_target =
+        use_home ? hs.pitch_return_target_relative_rad : ps.pitch_return_target_relative_rad;
+      const float picked_rel =
+        use_home ? hs.pitch_return_relative_rad : ps.pitch_return_relative_rad;
+      const float picked_fault = use_home ? static_cast<float>(hs.fault) : static_cast<float>(ps.fault);
+      const float picked_homed = (use_home ? hs.homed : ps.homed) ? 1.0f : 0.0f;
+      const float picked_pitch_tq = use_home ? hs.pitch_torque_nm : ps.pitch_torque_nm;
+      const float picked_m_tq = use_home ? hs.m2006_torque_nm : ps.m2006_torque_nm;
+      const float picked_stall = static_cast<float>(use_home ? hs.stall_elapsed_ms : ps.stall_elapsed_ms);
+      const float picked_mrel = use_home ? hs.m2006_relative_rad : ps.m2006_relative_rad;
+      const float picked_mlock = (use_home ? hs.m2006_locked : ps.m2006_locked) ? 1.0f : 0.0f;
+      const float picked_mfb_tq =
+        use_home ? hs.m2006_feedback_torque_nm : ps.m2006_feedback_torque_nm;
+      // 1 phase, 2 GM6020 absolute rad, 3/4 GM6020 return target/actual rad,
+      // 5 fault, 6 done; optional 7/8 command Nm and 9/10 feedback Nm (GM6020/M2006).
+      if (control_constants::HOME_PLOT_TORQUES) {
+        // 10 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
+        //          7 6020指令力矩 8 M2006指令力矩
+        //          9 stall_elapsed_ms（顶挡块计时，0→300 说明判定成功）
+        //          10 M2006反馈力矩
+        plotter.plot(
+          picked_stage, picked_pitch,
+          picked_target, picked_rel,
+          picked_fault, picked_homed, picked_pitch_tq,
+          picked_m_tq, picked_stall, picked_mrel,
+          picked_mlock,
+        picked_mfb_tq);  // ch10 angle, ch11 locked, ch12 M2006 feedback torque
+      }
+      else {
+        // 8 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
+        //         7 stall_elapsed_ms（顶挡块计时，0→300 说明判定成功）
+        //         8 6020 指令力矩（顶住时应达到 0.40）
+        plotter.plot(
+          picked_stage, picked_pitch,
+          picked_target, picked_rel,
+          picked_fault, picked_homed,
+          picked_stall, picked_pitch_tq);
+      }
     }
     else if (control_constants::IMU_STARTUP_DIAGNOSTICS) {
       const auto score = grading::read();

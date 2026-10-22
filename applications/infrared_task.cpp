@@ -123,7 +123,7 @@ extern "C" void infrared_task()
     if (!have_frame || now - last_frame_ms >=
                        control_constants::INFRARED_VALID_TIMEOUT_MS)
       g_data.infrared_valid = 0;
-    const bool le30 = (g_data.infrared_valid != 0U) && (g_data.distance_cm <= 30U);
+    const bool le30 = (g_data.infrared_valid != 0U) && (distance_cm <= 30.0f);
     if (!timer_started && le30) {
       timer_started = true;
       timer_start_ms = now;
