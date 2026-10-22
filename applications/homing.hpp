@@ -3,7 +3,8 @@
 #include <cstdint>
 #include "can.h"
 namespace homing {
-enum class Stage : uint8_t { Idle=0, WaitFeedback=1, SeekPitch=2, MovePitch=3, Done=4, Fault=5 };
+enum class Stage : uint8_t { Idle=0, WaitFeedback=1, SeekPitch=2, MovePitch=3, Done=4, Fault=5,
+  WaitInfrared=6 };
 enum class Fault : uint8_t { None=0, Config=1, Feedback=2, Timing=3, SeekTimeout=4,
   SeekTravel=5, MoveTimeout=6, PitchOverspeed=7, MoveOvershoot=8,
   NoSeekMotion=9, M2006Overspeed=10 };

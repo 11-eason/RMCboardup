@@ -6,8 +6,8 @@ namespace control_constants
 // Independent motor-test programs. true starts ONLY that program at power-on.
 // Both false: neither test runs; tracking uses FOLLOW_START_ENABLED below.
 // A finished/faulted test never automatically starts the other test or tracking.
-constexpr bool HOMING_ENABLED = false;
-constexpr bool PITCH_START_ENABLED = true;
+constexpr bool HOMING_ENABLED = true;
+constexpr bool PITCH_START_ENABLED = false;
 static_assert(
   !(HOMING_ENABLED && PITCH_START_ENABLED),
   "Enable only one motor test: HOMING_ENABLED or PITCH_START_ENABLED (shared motors/CAN frames)");
@@ -53,15 +53,16 @@ constexpr float HOME_PITCH_DIRECTION = 1.0f;  // Observed positive motion approa
 // Initial trial settings, not a mechanical rating or a tuned controller.
 constexpr float HOME_PITCH_SEEK_SPEED_RAD_S = 0.35f;  // reverted  // seek crawl speed: 0.35 -> 0.80
 constexpr float HOME_PITCH_SPEED_KP =
-  +0.08f;  // tau = J/Kp = 12.5ms（原 0.25 下 4ms，与 2ms 周期接近会自激）
-constexpr float HOME_PITCH_SPEED_KI = 0.45f;       // 与 hold 段一致
-constexpr float HOME_PITCH_MAX_TORQUE_NM = 0.40f;  // 顶挡块力矩：0.50 太高，硬顶会嗡嗡震动
+  +0.08f;  // tau = J/Kp = 12.5ms（原 0.25 �? 4ms，与 2ms 周期接近会自激�?
+constexpr float HOME_PITCH_SPEED_KI = 0.45f;  // �? hold 段一�?
+constexpr float HOME_PITCH_MAX_TORQUE_NM =
+  0.40f;  // 顶挡块力矩：0.50 太高，硬顶会嗡嗡震动
 constexpr float HOME_PITCH_STALL_SPEED_RAD_S =
   0.15f;  // Tolerate +/-1 rpm CAN quantization; angle window still required.
 constexpr float HOME_PITCH_STALL_TORQUE_NM =
-  0.30f;  // stall 力矩阈值：比顶挡块力矩低 0.10 留余量 // Feedback AND commanded torque.
+  0.30f;  // stall 力矩阈值：比顶挡块力矩�? 0.10 留余�? // Feedback AND commanded torque.
 constexpr float HOME_PITCH_STALL_TRAVEL_RAD =
-  0.05235988f;  // 3 deg：嘎噡震动的角度幅度可能超 0.5° // <=0.5 deg / stall window.
+  0.05235988f;  // 3 deg：嘎噡震动的角度幅度可能�? 0.5° // <=0.5 deg / stall window.
 // Startup stiction is NOT a reference. Rearward motion must be seen first.
 // If powered on against the stop, report NoSeekMotion instead of inventing zero.
 constexpr float HOME_PITCH_MIN_SEEK_TRAVEL_RAD =
@@ -176,13 +177,13 @@ constexpr float HOME_M2006_FINAL_DAMP_NM_PER_RAD_S = 0.20f;
 constexpr float HOME_M2006_FINAL_DEADBAND_RAD =
   0.08f;  // final M2006 hold: 3.0 (was 1.0)  // lowered from 4.0: avoid fighting the 6020 hold
 constexpr float HOME_M2006_SPEED_KP = 0.10f;
-// 回退阶段: M2006 转速 = FOLLOW × 6020转速。不锁死（仍能动），但保持柄结构一致，
-// 避免 M2006 完全自由时重力把 pitch 总成拖回挡块。正负号决定方向，反了就改成负值。
+// 回退阶段: M2006 转�? = FOLLOW × 6020转速。不锁死（仍能动），但保持柄结构一致，
+// 避免 M2006 完全自由时重力把 pitch 总成拖回挡块。正负号决定方向，反了就改成负值�?
 constexpr float HOME_M2006_RETURN_FOLLOW = -1.0f;  // flipped sign: try -1 first, then 0.5 / 2.0
 // Deadband for the M2006 hold: inside this error band the M2006 stays passive,
 // so it does not fight the 6020 through the linkage (removes the small oscillation).
 constexpr float HOME_M2006_HOLD_DEADBAND_RAD =
-  0.0f;  // no deadband: both axes hard-held at the end  // 4 deg  // 0 = 关闭该功能
+  0.0f;  // no deadband: both axes hard-held at the end  // 4 deg  // 0 = 关闭该功�?
 constexpr float HOME_M2006_SPEED_KI = 0.40f;
 constexpr float HOME_M2006_MAX_TORQUE_NM =
   1.00f;  // M2006 output-shaft hardware maximum  // M2006 axis max: the gearbox can also hold the pitch  // allow the M2006 path up to 1.2 Nm on the axis // HOLD only, never used during return.
@@ -255,13 +256,13 @@ static_assert(INFRARED_RAW_TO_CM > 0.0f, "Invalid distance unit conversion");
 // Initial tuning values only; NOT calibrated for this chassis.
 // Torque: gearbox output shaft N*m; speed: same shaft rad/s.
 // Refit K1/K2 if the shaft convention or actual gear ratio changes.
-// K1 是铜损系数；按参考文档它还承担"加减速阶段由加速度引起的额外能耗"。
-// 【2026-10 标定尝试记录】用 data_1（1291 采样，扣除 7.4% 刹车/再生）最小二乘得
-//   K1 = 3.97, K2 ≈ 0, K3 = 4.82，残差 ±1.49 W、R² = 0.981。
-//   但该批数据最高只到 62 W，76~80 W 属于外推 → 实机表现反而比下面这组经验值差，
-//   所以暂时回到"经验值 + 8 W 裕量"的方案。
-//   若要让标定真正生效：把 CHASSIS_POWER_LIMIT_W 临时设 200、绘图模式设 4，
-//   录一段真正跑到 90~100 W 的数据重新拟合，再用 3~4 W 裕量。
+// K1 是铜损系数；按参考文档它还承�?"加减速阶段由加速度引起的额外能�?"�?
+// �?2026-10 标定尝试记录】用 data_1�?1291 采样，扣�? 7.4% 刹车/再生）最小二乘得
+//   K1 = 3.97, K2 �? 0, K3 = 4.82，残�? ±1.49 W、R² = 0.981�?
+//   但该批数据最高只�? 62 W�?76~80 W 属于外推 �? 实机表现反而比下面这组经验值差�?
+//   所以暂时回�?"经验�? + 8 W 裕量"的方案�?
+//   若要让标定真正生效：�? CHASSIS_POWER_LIMIT_W 临时�? 200、绘图模式设 4�?
+//   录一段真正跑�? 90~100 W 的数据重新拟合，再用 3~4 W 裕量�?
 // K2 must be calibrated in the actual shaft-speed coordinates.
 // Rotor-to-output conversion multiplies the speed-squared coefficient by ratio^2.
 constexpr float POWER_K1 = 2.80f;  // bias-era coefficient  // bias-era coefficient   // W / (N*m)^2
@@ -279,16 +280,16 @@ constexpr float POWER_BIAS_RECOVER_BAND_W = 2.0f;
 constexpr float POWER_BIAS_FILTER_S = 0.3f;
 constexpr float POWER_MECH_LOSS_RATIO = 0.25f;  // transmission/ESC loss
 constexpr float POWER_RESERVE_LEAD_S = 0.05f;
-constexpr float POWER_RESERVE_MAX_W = 15.0f;  // bias-era coefficient    // W, 整机空载损耗
+constexpr float POWER_RESERVE_MAX_W = 15.0f;  // bias-era coefficient    // W, 整机空载损�?
 
 constexpr bool POWER_MODEL_CALIBRATED = false;
 
 constexpr float CHASSIS_POWER_LIMIT_W =
   80.0f;  // hard limit  // restored: real 80 W limit  // temporarily raised: compare prediction vs measured without limiting
 // Measured-power PI target = LIMIT - MARGIN; model budget = target + bounded PI trim.
-// 标定后模型误差只有 ±1.5 W（最大 6.5 W），所以裕量可以从 8 W 降回 4 W：
-//   限幅点 76 W，均值贴 76，峰值约 80~82。
-// 想更激进用 3；想更保守用 5~6。
+// 标定后模型误差只�? ±1.5 W（最�? 6.5 W），所以裕量可以从 8 W 降回 4 W�?
+//   限幅�? 76 W，均值贴 76，峰值约 80~82�?
+// 想更激进用 3；想更保守用 5~6�?
 constexpr float POWER_LIMIT_MARGIN_W =
   8.0f;  // nominal budget 72 W  // limit target 77 W (80 - 3)  // bias-era margin (target 72 W)
 static_assert(CHASSIS_POWER_LIMIT_W > 0.0f, "Power limit must be positive");
@@ -298,7 +299,7 @@ static_assert(
 constexpr unsigned POWER_LIMIT_SEARCH_STEPS = 24;
 static_assert(POWER_LIMIT_SEARCH_STEPS > 0, "Search needs at least one step");
 
-// 功率计多久没更新就视为无效（不再参与修正）
+// 功率计多久没更新就视为无效（不再参与修正�?
 constexpr unsigned POWER_METER_TIMEOUT_MS = 200U;
 
 // Measured-power PI (budget correction in W), matching power_model.cpp.
@@ -335,171 +336,181 @@ static_assert(
 
 // =====================================================================
 // ===== 云台轨迹跟随 =====
-// 结构：位置环 P(+可选 I/D，速度前馈) → 速度限幅/斜坡 → 速度环 PI → 力矩限幅
+// 结构：位置环 P(+可�? I/D，速度前馈) �? 速度限幅/斜坡 �? 速度�? PI �? 力矩限幅
 //       力矩前馈：加速度 J·α + 重力 K_g·cosθ + 摩擦 τ_c·sgn(ω)
-// 单位：角度 rad、角速度 rad/s、角加速度 rad/s^2、力矩 N·m、惯量 kg·m^2
+// 单位：角�? rad、角速度 rad/s、角加速度 rad/s^2、力�? N·m、惯�? kg·m^2
 // =====================================================================
 
-// ---- 电机与装配 ----
-// GM6020 的 ID 由电机上的拨码开关决定：1/2/3 位是 ID 的二进制位，第 4 位是 120 Ω 终端电阻。
-//   拨成 ID=1：1 位 ON，2、3 位 OFF
-//   拨成 ID=2：2 位 ON，1、3 位 OFF
-//   拨成 ID=4：3 位 ON，1、2 位 OFF
-// 当前硬件是 ID 2 和 4，所以这里按 2/4 配置。若要把两台电机统一改成 1 和 2：
-// 改拨码后，把下面两个数字改成 1 和 2 重烧。
-// CAN 滤波器是"全通"（掩码全 0），任何 ID 都能收到，不需要改滤波配置。
+// ---- 电机与装�? ----
+// GM6020 �? ID 由电机上的拨码开关决定：1/2/3 位是 ID 的二进制位，�? 4 位是 120 Ω 终端电阻�?
+//   拨成 ID=1�?1 �? ON�?2�?3 �? OFF
+//   拨成 ID=2�?2 �? ON�?1�?3 �? OFF
+//   拨成 ID=4�?3 �? ON�?1�?2 �? OFF
+// 当前硬件�? ID 2 �? 4，所以这里按 2/4 配置。若要把两台电机统一改成 1 �? 2�?
+// 改拨码后，把下面两个数字改成 1 �? 2 重烧�?
+// CAN 滤波器是"全�?"（掩码全 0），任何 ID 都能收到，不需要改滤波配置�?
 constexpr unsigned FOLLOW_YAW_MOTOR_ID = 4U;
 constexpr unsigned FOLLOW_PITCH_MOTOR_ID = 2U;
 constexpr float FOLLOW_YAW_RATIO = 1.0f;
 constexpr float FOLLOW_PITCH_RATIO = 1.0f;
-// 关节角随编码器角增长。若某轴反向追、误差越追越大，把对应方向改成 -1。
+// 关节角随编码器角增长。若某轴反向追、误差越追越大，把对应方向改�? -1�?
 constexpr float FOLLOW_YAW_DIRECTION = 1.0f;
 constexpr float FOLLOW_PITCH_DIRECTION = 1.0f;
 
 // ---- 运行模式 ----
-// false = 两轴都跟随（当前测 pitch 需要它，否则 pitch 力矩恒为 0）
+// false = 两轴都跟随（当前�? pitch 需要它，否�? pitch 力矩恒为 0�?
 constexpr bool FOLLOW_SINGLE_YAW = false;  // yaw-only test: no pitch feedback required
-// 恒力矩台架测试：不做闭环，只输出固定力矩（测静摩擦、确认转向）。测完必须改回 false。
-// 【方向符号已验证：正力矩 → 实际角度增大，符号正确，DIRECTION 保持 1.0】
+// 恒力矩台架测试：不做闭环，只输出固定力矩（测静摩擦、确认转向）。测完必须改�? false�?
+// 【方向符号已验证：正力矩 �? 实际角度增大，符号正确，DIRECTION 保持 1.0�?
 constexpr bool FOLLOW_CONSTANT_TORQUE_TEST = false;
 constexpr float FOLLOW_TEST_TORQUE_NM = 0.12f;
 constexpr float FOLLOW_TEST_TRIP_SPEED_RAD_S = 5.23598776f;  // 50 rpm，超速即锁存停机
-// 机械行程保护：裸电机阶段关闭；装上云台后打开并填真实行程。
+// 机械行程保护：裸电机阶段关闭；装上云台后打开并填真实行程�?
 constexpr bool FOLLOW_ENFORCE_ANGLE_LIMITS = false;
-// 时间缩放：1 = 原始 680 ms 周期（最快）；2/4 = 放慢并同时降低速度、加速度。
-constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 2U;  // 1360 ms/圈（缩放 4 已验证 OK，提速一档）
+// 时间缩放�?1 = 原始 680 ms 周期（最快）�?2/4 = 放慢并同时降低速度、加速度�?
+constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE =
+  2U;  // 1360 ms/圈（缩放 4 已验�? OK，提速一档）
 constexpr bool FOLLOW_START_ENABLED =
   false;  // pitch_start test: yaw follow off  // Auto-start yaw after fresh feedback and initial pose capture.
-constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE = true;  // 上电自动记录初始姿态
-constexpr bool FOLLOW_USE_RC_STOP = false;               // 用遥控器右拨杆下档急停
+constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE =
+  true;                                     // 上电自动记录初始姿�?
+constexpr bool FOLLOW_USE_RC_STOP = false;  // 用遥控器右拨杆下档急停
 
 // ---- 时序 ----
 constexpr unsigned FOLLOW_PERIOD_MS = 1U;  // 控制周期 1 ms
-// 电流帧发送周期 = 执行器的采样周期。电机只在收到新帧时更新力矩，
-// 所以闭环时间常数 τ 必须 ≥ 5~10 倍这个值，否则采样环自激（嗡嗡响）。
-// 取 2 ms（500 Hz）是总线负载与带宽的折中；总线余量足够时可试 1 ms。
+// 电流帧发送周�? = 执行器的采样周期。电机只在收到新帧时更新力矩�?
+// 所以闭环时间常�? τ 必须 �? 5~10 倍这个值，否则采样环自激（嗡嗡响）�?
+// �? 2 ms�?500 Hz）是总线负载与带宽的折中；总线余量足够时可�? 1 ms�?
 constexpr unsigned FOLLOW_CAN_TX_INTERVAL_MS =
   1U;  // 2 -> 1 ms: closes the loop twice as fast (control only)
 constexpr unsigned FOLLOW_COMMAND_TIMEOUT_MS = 20U;
 constexpr unsigned FOLLOW_FEEDBACK_TIMEOUT_MS = 100U;
-constexpr unsigned FOLLOW_MAX_STEP_MS = 10U;  // 调度间隔超过它就重新初始化 PID
+constexpr unsigned FOLLOW_MAX_STEP_MS =
+  10U;  // 调度间隔超过它就重新初始�? PID
 
 // ---- 安全判据 ----
 constexpr float FOLLOW_MAX_TRACKING_ERROR_RAD = 0.34906585f;  // 20°
-constexpr unsigned FOLLOW_TRACKING_ERROR_MS = 50U;            // 连续超限 50 ms 即停机
+constexpr unsigned FOLLOW_TRACKING_ERROR_MS = 50U;            // 连续超限 50 ms 即停�?
 constexpr float FOLLOW_OVERSPEED_FACTOR = 1.5f;
 
 // ---- 前馈 ----
 // 力矩前馈 = J·α_ref + K_g·cos(pitch) + τ_c·sgn(ω)
-// 裸电机 J 很小(≈1.3e-4)、无重力，所以前两项为 0；摩擦项是裸电机跟踪的关键。
+// 裸电�? J 很小(�?1.3e-4)、无重力，所以前两项�? 0；摩擦项是裸电机跟踪的关键�?
 constexpr float FOLLOW_YAW_ACCEL_FF_J = 0.0f;  // kg·m^2
 constexpr float FOLLOW_PITCH_ACCEL_FF_J = 0.0f;
 constexpr float FOLLOW_PITCH_GRAVITY_NM = 0.0f;  // m·g·r
-// 库仑摩擦前馈（N·m）。裸电机实测启动摩擦约 0.1 A ≈ 0.074 N·m；
-// 取 0.05 既能把低速"粘住"补掉，又不会在停顿反向点造成震动（实测最优）。
+// 库仑摩擦前馈（N·m）。裸电机实测启动摩擦�? 0.1 A �? 0.074 N·m�?
+// �? 0.05 既能把低�?"粘住"补掉，又不会在停顿反向点造成震动（实测最优）�?
 constexpr float FOLLOW_YAW_FRICTION_NM =
   0.05f;  // revert: 0.07 was worse  // 0.05 -> 0.07  // back to the 0.237 best  // 0.05 -> 0.10: must break stiction at the reversal notch  // restored: removing it dropped the score 0.237 -> 0.168  // test: friction feedforward off, to check half-cycle asymmetry
 constexpr float FOLLOW_PITCH_FRICTION_NM = 0.05f;
 // 平滑符号函数的过渡带（rad/s）：信号小于它时前馈按比例减小，避免过零抖动
 constexpr float FOLLOW_FRICTION_BLEND_RAD_S =
   0.02f;  // revert: 0.05 was worse  // 0.02 -> 0.05: wider blend = smoother at each of the 3 reversals
-// 摩擦前馈方向信号的低通时间常数（s）。轨迹每周期有 6 个"停住再反向"的点，
-// 速度指令会在零点逐拍抖动；直接取符号会让力矩每拍翻转 ±τ_c → 震动。
-// 先低通再取符号，前馈变成缓变的 ±τ_c，震动消失而补偿能力基本保留。设 0 = 不滤波。
+// 摩擦前馈方向信号的低通时间常数（s）。轨迹每周期�? 6 �?"停住再反�?"的点�?
+// 速度指令会在零点逐拍抖动；直接取符号会让力矩每拍翻转 ±τ_c �? 震动�?
+// 先低通再取符号，前馈变成缓变�? ±τ_c，震动消失而补偿能力基本保留。设 0 = 不滤泀�?
 constexpr float FOLLOW_FRICTION_FILTER_S = 0.03f;
-// 静摩擦脱困（带滞环的辅助力矩）：误差 > ON 且几乎不动 → 沿误差方向补 τ_c；
-// 误差 < OFF 或已经动起来 → 撤销。设为 0 即关闭（当前关闭，改用摩擦前馈）。
+// 静摩擦脱困（带滞环的辅助力矩）：误差 > ON 且几乎不�? �? 沿误差方向补 τ_c�?
+// 误差 < OFF 或已经动起来 �? 撤销。设�? 0 即关闭（当前关闭，改用摩擦前馈）�?
 constexpr float FOLLOW_BREAKAWAY_ON_RAD =
   0.0f;  // disabled again: the kick fired at every peak and added error  // 0 -> 0.015 rad (0.86 deg): ENABLE the anti-stiction kick
 constexpr float FOLLOW_BREAKAWAY_OFF_RAD =
   0.010f;  // original value  // 0.010 -> 0.006: must be below ON
 constexpr float FOLLOW_BREAKAWAY_SPEED_RAD_S = 0.15f;
 
-// ---- 增益与限幅 ----
-// 增益量级的来历（已验证）：
-//   速度环 Kp ≈ 0.015 N·m/(rad/s) = 0.02 A/(rad/s)。再高会自激：
-//   闭环时间常数 τ = J/(Kt·Kp)，J≈1.3e-4、Kt=0.741、Kp=0.04 时 τ≈4.4 ms，
-//   而电流帧周期 5 ms 时 τ < 周期 → 采样环必然振荡（之前"震动"的根因）。
-//   积分上限必须 ≥ 静摩擦对应的力矩，否则积分顶不过摩擦。
-//   位置环 Kp：12 → 15 用于压缩高速段的"切角"滞后。
+// ---- 增益与限�? ----
+// 增益量级的来历（已验证）�?
+//   速度�? Kp �? 0.015 N·m/(rad/s) = 0.02 A/(rad/s)。再高会自激�?
+//   闭环时间常数 τ = J/(Kt·Kp)，J�?1.3e-4、Kt=0.741、Kp=0.04 �? τ�?4.4 ms�?
+//   而电流帧周期 5 ms �? τ < 周期 �? 采样环必然振荡（之前"震动"的根因）�?
+//   积分上限必须 �? 静摩擦对应的力矩，否则积分顶不过摩擦�?
+//   位置�? Kp�?12 �? 15 用于压缩高速段�?"切角"滞后�?
 constexpr float FOLLOW_YAW_ANGLE_KP =
-  70.0f;  // 85 gave no gain -> back to the 1 ms best  // 70 -> 85: outer loop, no buzz risk  // 55 -> 70: score scales with outer gain (0.083 -> 0.198)  // 35 -> 55: outer loop can go higher without buzz  // 20 -> 35: outer loop only; buzz comes from the inner loop, so this is safe  // 25 -> 20: slight reduction to remove residual wobble  // 10 -> 25: raise position bandwidth (was attenuating to 50%)  // (rad/s)/rad【原始周期：带宽需 ≥3×1.47Hz，10 太小】
+  70.0f;  // 85 gave no gain -> back to the 1 ms best  // 70 -> 85: outer loop, no buzz risk  // 55 -> 70: score scales with outer gain (0.083 -> 0.198)  // 35 -> 55: outer loop can go higher without buzz  // 20 -> 35: outer loop only; buzz comes from the inner loop, so this is safe  // 25 -> 20: slight reduction to remove residual wobble  // 10 -> 25: raise position bandwidth (was attenuating to 50%)  // (rad/s)/rad【原始周期：带宽需 �?3×1.47Hz�?10 太小�?
 constexpr float FOLLOW_YAW_ANGLE_KI =
-  6.0f;  // revert: 14 was worse  // 6 -> 14: absorb the constant yaw bias within one 1.36 s cycle  // 4 -> 6  // 2 -> 4: helps the lag without adding high-frequency content   // 消除峰谷处的静态误差（纯 P 压不掉）
+  6.0f;  // revert: 14 was worse  // 6 -> 14: absorb the constant yaw bias within one 1.36 s cycle  // 4 -> 6  // 2 -> 4: helps the lag without adding high-frequency content   // 消除峰谷处的静态误差（�? P 压不掉）
 constexpr float FOLLOW_YAW_ANGLE_KD =
-  1.0f;  // 0.8 mismatched the 1.0 velocity FF and ate 80% of the drive  // 与前馈(1.0)冲突：KD 必须为 0 或 1.0，中间值会吃掉驱动
+  1.0f;  // 0.8 mismatched the 1.0 velocity FF and ate 80% of the drive  // 与前�?(1.0)冲突：KD 必须�? 0 �? 1.0，中间值会吃掉驱动
 constexpr float FOLLOW_YAW_ANGLE_INTEGRAL_LIMIT =
-  0.30f;  // revert: 0.45 was worse  // 0.30 -> 0.45: allow enough authority for the bias                                      // rad/s（积分最多贡献 0.3 rad/s 的速度指令）
+  0.30f;  // revert: 0.45 was worse  // 0.30 -> 0.45: allow enough authority for the bias                                      // rad/s（积分最多贡�? 0.3 rad/s 的速度指令�?
 constexpr float FOLLOW_YAW_SPEED_KP =
-  0.18f;  // 0.22 gave no gain -> back to the 1 ms best  // 0.18 -> 0.22: 1 ms command rate gives headroom  // 0.13 -> 0.18: inner loop can be faster with the 1 ms command rate  // back to the known-stable value (tau 7.7 ms)  // 0.20 -> 0.16: 0.20 was self-oscillating (tau near CAN period)  // 0.13 -> 0.20: faster inner loop, tau = J/Kp = 5 ms > 2 ms CAN  // N·m/(rad/s)【装云台后：0.015→0.100】
+  0.18f;  // 0.22 gave no gain -> back to the 1 ms best  // 0.18 -> 0.22: 1 ms command rate gives headroom  // 0.13 -> 0.18: inner loop can be faster with the 1 ms command rate  // back to the known-stable value (tau 7.7 ms)  // 0.20 -> 0.16: 0.20 was self-oscillating (tau near CAN period)  // 0.13 -> 0.20: faster inner loop, tau = J/Kp = 5 ms > 2 ms CAN  // N·m/(rad/s)【装云台后：0.015�?0.100�?
 constexpr float FOLLOW_YAW_SPEED_KI =
   0.35f;  // 0.45 -> 0.35: integral also feeds high-frequency buzz  // N·m/rad（恢复验证值）
 constexpr float FOLLOW_YAW_SPEED_KD = 0.001f;
 constexpr float FOLLOW_YAW_SPEED_INTEGRAL_LIMIT = 0.25f;  // N·m
 constexpr float FOLLOW_YAW_ANGLE_MIN_RAD = 0.0f;
 constexpr float FOLLOW_YAW_ANGLE_MAX_RAD = 0.0f;
-constexpr float FOLLOW_YAW_MAX_SPEED_RAD_S = 10.0f;  // 原始周期峰值 7.15
+constexpr float FOLLOW_YAW_MAX_SPEED_RAD_S = 10.0f;  // 原始周期峰�? 7.15
 constexpr float FOLLOW_YAW_MAX_ACCEL_RAD_S2 =
-  300.0f;  // revert: 450 was worse  // 300 -> 450: the small spikes at each peak need sharper accel  // 130 -> 300: 130 clipped the corner accelerations  // 原始周期峰值 106.9
+  300.0f;  // revert: 450 was worse  // 300 -> 450: the small spikes at each peak need sharper accel  // 130 -> 300: 130 clipped the corner accelerations  // 原始周期峰�? 106.9
 constexpr float FOLLOW_YAW_MAX_TORQUE_NM =
-  0.95f;  // 0.80 -> 0.95 (single change: peaks may be torque-clipped)  // back to the 0.237 best  // 0.80 -> 1.20: extra authority to escape the notch  // 0.40 clipped the acceleration      // ≈0.54 A
+  0.95f;  // 0.80 -> 0.95 (single change: peaks may be torque-clipped)  // back to the 0.237 best  // 0.80 -> 1.20: extra authority to escape the notch  // 0.40 clipped the acceleration      // �?0.54 A
 constexpr float FOLLOW_YAW_VELOCITY_FF = 1.0f;
 constexpr bool FOLLOW_YAW_CONFIGURED = true;
 
-// pitch 轴：与 yaw 同步为"装云台"整定值（内环必须加强，否则跟随严重滞后）
-constexpr float FOLLOW_PITCH_ANGLE_KP = 20.0f;  // pitch 惯量小，yaw 的 15 会超调 60%，先降到 6
+// pitch 轴：�? yaw 同步�?"装云�?"整定值（内环必须加强，否则跟随严重滞后）
+constexpr float FOLLOW_PITCH_ANGLE_KP =
+  20.0f;  // pitch 惯量小，yaw �? 15 会超�? 60%，先降到 6
 constexpr float FOLLOW_PITCH_ANGLE_KI = 2.0f;
 constexpr float FOLLOW_PITCH_ANGLE_KD = 0.0f;
 constexpr float FOLLOW_PITCH_ANGLE_INTEGRAL_LIMIT = 0.30f;
-constexpr float FOLLOW_PITCH_SPEED_KP = 0.080f;  // pitch 惯量小，内环适当降低（yaw 用 0.13）
+constexpr float FOLLOW_PITCH_SPEED_KP =
+  0.080f;  // pitch 惯量小，内环适当降低（yaw �? 0.13�?
 constexpr float FOLLOW_PITCH_SPEED_KI = 0.45f;
 constexpr float FOLLOW_PITCH_SPEED_KD = 0.0f;
 constexpr float FOLLOW_PITCH_SPEED_INTEGRAL_LIMIT = 0.25f;
 constexpr float FOLLOW_PITCH_ANGLE_MIN_RAD = 0.0f;
 constexpr float FOLLOW_PITCH_ANGLE_MAX_RAD = 0.0f;
-constexpr float FOLLOW_PITCH_MAX_SPEED_RAD_S = 10.0f;    // 原始周期峰值 8.31
-constexpr float FOLLOW_PITCH_MAX_ACCEL_RAD_S2 = 130.0f;  // 原始周期峰值 69.0
+constexpr float FOLLOW_PITCH_MAX_SPEED_RAD_S = 10.0f;    // 原始周期峰�? 8.31
+constexpr float FOLLOW_PITCH_MAX_ACCEL_RAD_S2 = 130.0f;  // 原始周期峰�? 69.0
 constexpr float FOLLOW_PITCH_MAX_TORQUE_NM = 0.40f;
 constexpr float FOLLOW_PITCH_VELOCITY_FF = 1.0f;
 constexpr bool FOLLOW_PITCH_CONFIGURED = true;
 
-// 微分滤波时间常数（当前 Kd = 0，保留以便以后启用）
+// 微分滤波时间常数（当�? Kd = 0，保留以便以后启用）
 constexpr float FOLLOW_D_FILTER_S = 0.05f;
 
-// ---- 上电找零（撞挡块 → 回退固定角度 → 该位置作为起始角）----
-// 流程：恒力矩朝一个方向慢转 → 角速度≈0 持续 STALL_MS 判定顶到挡块
-//       → 反向走 BACKOFF_RAD → 停稳 SETTLE_MS → 捕捉参考零点并进入跟随
-// 第一次方向超时会自动换反方向重试；两个方向都超时 → 报故障、不出力矩。
+// ---- 上电找零（撞挡块 �? 回退固定角度 �? 该位置作为起始角�?----
+// 流程：恒力矩朝一个方向慢�? �? 角速度�?0 持续 STALL_MS 判定顶到挡块
+//       �? 反向�? BACKOFF_RAD �? 停稳 SETTLE_MS �? 捕捉参考零点并进入跟随
+// 第一次方向超时会自动换反方向重试；两个方向都超时 �? 报故障、不出力矩�?
 constexpr bool FOLLOW_HOMING_ENABLED = true;
-// 单轴找零开关：yaw 用绝对编码器/相对起点，不需要撞挡块；只给 pitch 找零
+// 单轴找零开关：yaw 用绝对编码器/相对起点，不需要撞挡块；只�? pitch 找零
 constexpr bool FOLLOW_YAW_HOMING_ENABLED = false;
 constexpr bool FOLLOW_PITCH_HOMING_ENABLED = true;
 constexpr float FOLLOW_HOMING_TORQUE_NM = 0.15f;          // yaw 试探力矩
-constexpr float FOLLOW_HOMING_PITCH_TORQUE_NM = 0.30f;    // pitch 试探力矩需大于重力矩
-constexpr float FOLLOW_HOMING_STALL_SPEED_RAD_S = 0.06f;  // 判定"停转"的速度阈值
-// 找零采用"限速爬行"而不是恒力矩：恒力矩在自由轴上会一直加速，0.1 秒就能冲到超速。
-constexpr float FOLLOW_HOMING_SEEK_SPEED_RAD_S = 0.60f;  // 找零爬行目标转速
-constexpr float FOLLOW_HOMING_SEEK_KP = 1.0f;            // 找零速度环增益 N·m/(rad/s)
-constexpr unsigned FOLLOW_HOMING_STALL_MS = 200U;        // 停转持续多久算顶到挡块
-constexpr unsigned FOLLOW_HOMING_TIMEOUT_MS = 4000U;     // 单个方向最长找零时间
-constexpr float FOLLOW_HOMING_BACKOFF_RAD = 0.5236f;     // 顶到挡块后回退的角度（30°）
-// 回退段力矩 = 启动力矩前馈 + 位置P - 速度D。启动力矩必须大于云台的静摩擦+重力，
-// 否则会像之前那样：顶到挡块后 0.09 N·m 推不动，卡在原地不动。
-constexpr float FOLLOW_HOMING_BACKOFF_FF_NM = 0.20f;  // 启动力矩前馈（脱离挡块用）
-constexpr float FOLLOW_HOMING_POS_KP = 1.5f;          // 回退段位置增益 N·m/rad
-constexpr float FOLLOW_HOMING_POS_KD = 0.10f;  // 回退段阻尼 N·m/(rad/s)（30 度行程需更大阻尼）
-constexpr float FOLLOW_HOMING_MAX_TORQUE_NM = 0.45f;          // 回退段力矩上限
-constexpr float FOLLOW_HOMING_TOLERANCE_RAD = 0.01f;          // 回退到位判定
-constexpr unsigned FOLLOW_HOMING_SETTLE_MS = 100U;            // 到位后稳定确认时间
-constexpr unsigned FOLLOW_HOMING_BACKOFF_TIMEOUT_MS = 3000U;  // 回退超时（推不动就报错）
+constexpr float FOLLOW_HOMING_PITCH_TORQUE_NM = 0.30f;    // pitch 试探力矩需大于重力�?
+constexpr float FOLLOW_HOMING_STALL_SPEED_RAD_S = 0.06f;  // 判定"停转"的速度阈�?
+// 找零采用"限速爬�?"而不是恒力矩：恒力矩在自由轴上会一直加速，0.1 秒就能冲到超速�?
+constexpr float FOLLOW_HOMING_SEEK_SPEED_RAD_S = 0.60f;  // 找零爬行目标转�?
+constexpr float FOLLOW_HOMING_SEEK_KP = 1.0f;  // 找零速度环增�? N·m/(rad/s)
+constexpr unsigned FOLLOW_HOMING_STALL_MS = 200U;     // 停转持续多久算顶到挡�?
+constexpr unsigned FOLLOW_HOMING_TIMEOUT_MS = 4000U;  // 单个方向最长找零时�?
+constexpr float FOLLOW_HOMING_BACKOFF_RAD =
+  0.5236f;  // 顶到挡块后回退的角度（30°�?
+// 回退段力�? = 启动力矩前馈 + 位置P - 速度D。启动力矩必须大于云台的静摩�?+重力�?
+// 否则会像之前那样：顶到挡块后 0.09 N·m 推不动，卡在原地不动�?
+constexpr float FOLLOW_HOMING_BACKOFF_FF_NM =
+  0.20f;  // 启动力矩前馈（脱离挡块用�?
+constexpr float FOLLOW_HOMING_POS_KP = 1.5f;  // 回退段位置增�? N·m/rad
+constexpr float FOLLOW_HOMING_POS_KD =
+  0.10f;  // 回退段阻�? N·m/(rad/s)�?30 度行程需更大阻尼�?
+constexpr float FOLLOW_HOMING_MAX_TORQUE_NM = 0.45f;  // 回退段力矩上�?
+constexpr float FOLLOW_HOMING_TOLERANCE_RAD = 0.01f;  // 回退到位判定
+constexpr unsigned FOLLOW_HOMING_SETTLE_MS = 100U;    // 到位后稳定确认时�?
+constexpr unsigned FOLLOW_HOMING_BACKOFF_TIMEOUT_MS =
+  3000U;  // 回退超时（推不动就报错）
 
 // ---- 绘图 ----
-// 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw：目标/实际/分数，双轴按下方配置），
+// 0 = 底盘功率（实�? / 期望 / 限幅系数），1 = 跟随曲线（单yaw：目�?/实际/分数，双轴按下方配置），
 // 2 = 原始参考，3 = 底盘诊断（FL 目标速度 / 实际速度 / 力矩 / 静止释放标志），
-// 4 = 功率模型标定（Στω / Στ²×100 / Σω²÷20 / 实测功率）
+// 4 = 功率模型标定（Στ�? / Στ²×100 / Σω²÷20 / 实测功率�?
 constexpr unsigned FOLLOW_PLOT_MODE = 1U;
-constexpr bool FOLLOW_YAW_DIAGNOSTICS = false;  // 当前：双轴反馈帧数诊断（查 pitch 电机是否在线）
-// 模式 1 画哪根轴：0 = yaw（目标/实际），1 = pitch（目标/实际）
+constexpr bool FOLLOW_YAW_DIAGNOSTICS =
+  false;  // 当前：双轴反馈帧数诊断（�? pitch 电机是否在线�?
+// 模式 1 画哪根轴�?0 = yaw（目�?/实际），1 = pitch（目�?/实际�?
 constexpr unsigned FOLLOW_PLOT_AXIS = 0U;
 
 static_assert(
@@ -530,22 +541,24 @@ struct FollowPidConfig
   float kp;
   float ki;
   float kd;
-  float integral_limit;  // 积分项输出的绝对值上限（角度环 rad/s，速度环 N·m）
+  float
+    integral_limit;  // 积分项输出的绝对值上限（角度�? rad/s，速度�? N·m�?
 };
 
 struct FollowAxisConfig
 {
-  FollowPidConfig angle_pid;  // 输入关节角 rad，输出目标转速 rad/s
-  FollowPidConfig speed_pid;  // 输入转速 rad/s，输出力矩 N·m
+  FollowPidConfig angle_pid;  // 输入关节�? rad，输出目标转�? rad/s
+  FollowPidConfig speed_pid;  // 输入转�? rad/s，输出力�? N·m
   float angle_min_rad;        // 机械行程（不是轨迹范围）
   float angle_max_rad;
   float max_speed_rad_s;
-  float max_accel_rad_s2;  // 目标转速斜坡，必须 ≥ 轨迹峰值加速度
-  float max_output;        // 对称力矩限幅 N·m
+  float
+    max_accel_rad_s2;  // 目标转速斜坡，必须 �? 轨迹峰值加速度
+  float max_output;  // 对称力矩限幅 N·m
   float velocity_feedforward_gain;
-  float accel_feedforward_j;     // 加速度前馈惯量 kg·m^2，0 = 关闭
-  float gravity_coefficient_nm;  // 重力矩系数 m·g·r，0 = 关闭
-  float friction_nm;             // 库仑摩擦前馈 N·m，0 = 关闭
+  float accel_feedforward_j;     // 加速度前馈惯量 kg·m^2�?0 = 关闭
+  float gravity_coefficient_nm;  // 重力矩系�? m·g·r�?0 = 关闭
+  float friction_nm;             // 库仑摩擦前馈 N·m�?0 = 关闭
   bool configured;
 };
 

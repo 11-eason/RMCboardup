@@ -4,6 +4,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "control_constants.hpp"
+#include "shared_data.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
 
 extern "C" void buzzer_signal_homing_done();
@@ -12,6 +13,14 @@ extern "C" void buzzer_signal_homing_done();
 namespace homing {
 namespace {
 namespace c = control_constants;
+// IR-triggered M2006 descent/return:
+//   Stage 1: GM6020 seek to the rear stop (base).
+//   Wait at the base until IR<=30 cm.
+//   Stage 2: M2006 forward to the descent posture, then hold there for 5 s.
+//   Stage 3: M2006 reverse for 5 s, with no further IR condition.
+constexpr uint16_t IR_TRIGGER_DISTANCE_CM = 30U;
+constexpr uint32_t M2006_DESCENT_HOLD_MS = 5000U;
+constexpr uint32_t M2006_RETURN_MS = 5000U;
 static_assert(configTICK_RATE_HZ == 1000, "Homing requires 1ms ticks");
 sp::RM_Motor pitch(c::HOME_PITCH_ID, sp::RM_Motors::GM6020, c::HOME_PITCH_RATIO);
 sp::RM_Motor m2006(c::HOME_M2006_ID, sp::RM_Motors::M2006, c::HOME_M2006_RATIO);
@@ -46,12 +55,13 @@ struct Controller {
   bool m2006_home_armed=false, m2006_home_done=false;
   uint32_t m2006_home_since=0;
   uint32_t m2006_settle_since=0;
-  bool m2006_pullback=false;  // reached pullback angle -> reverse drive
-  bool pullback_wait=false;   // reached the bottom -> hold 5 s before reversing
+  bool m2006_pullback=false;  // descent done -> return drive
+  bool m2006_descent_hold=false;  // descent posture reached -> 5 s hold
+  uint32_t m2006_descent_since=0; // stage 2 hold start time
+  uint32_t m2006_return_since=0;  // stage 3 start time (5 s rise)
   bool phase_a_hold=false;    // phase A done -> lock the M2006 for 5 s
   uint32_t phase_a_hold_since=0;
   float phase_a_hold_angle=0.0f;
-  uint32_t pullback_wait_since=0;
   bool m2006_hold_locked=false;   // reached ch10 target -> hold engaged
   uint32_t m2006_hold_since=0;
   float m2006_hold_angle=0.0f;
@@ -145,15 +155,28 @@ struct Controller {
         }
         out.stall_elapsed_ms=now-stall_since;
         if (out.stall_elapsed_ms>=c::HOME_PITCH_STALL_MS) {
-          // Remove seek current, then reverse THIS GM6020; M2006 stays released.
+          // Stage 1 complete: GM6020 is seated at the rear stop (base).
+          // Stop here and wait for IR<=30cm; M2006 remains released.
           out.pitch_torque_nm=0.0f;pitch_pi={};pitch_speed_cmd=0.0f;
           pitch_return_origin=f.pa;m_origin=f.ma;
           out.pitch_return_relative_rad=0.0f;out.m2006_relative_rad=0.0f;
-          out.pitch_return_target_relative_rad=-c::HOME_PITCH_DIRECTION*c::HOME_PITCH_RETURN_MOVE_RAD;
-          out.stage=Stage::MovePitch;entered=now;m_pi={};m_speed_cmd=0.0f;
+          out.pitch_return_target_relative_rad=0.0f;
+          out.stage=Stage::WaitInfrared;entered=now;m_pi={};m_speed_cmd=0.0f;
         }
       }
       return; // M2006 remains zero for this entire phase.
+    }
+    if (out.stage==Stage::WaitInfrared) {
+      // Stage 1 finished. Hold at the rear stop (zero M2006 torque) until the
+      // IR sensor reports <=30cm, then start the M2006 descent.
+      out.pitch_torque_nm=0.0f;out.m2006_torque_nm=0.0f;
+      out.pitch_return_target_relative_rad=0.0f;
+      if ((g_data.infrared_valid!=0U) &&
+          (g_data.distance_cm<=IR_TRIGGER_DISTANCE_CM)) {
+        out.stage=Stage::MovePitch;entered=now;
+        pitch_locked=false;phaseb_torque=0.0f;m_pi={};m_speed_cmd=0.0f;
+      }
+      return;
     }
     if (out.stage==Stage::MovePitch) {
       // New scheme: the M2006 does all the motion.
@@ -210,44 +233,38 @@ struct Controller {
             if (now-phase_a_hold_since>=5000U) phase_a_hold=false;
             return;
           }
-          // Reached the bottom: stop here and wait 5 s before reversing.
-          // The 6020 keeps its phase-B lock during the wait.
-          if (!m2006_pullback && out.m2006_relative_rad>=c::HOME_M2006_PULLBACK_RAD) {
-            if (!pullback_wait) {
-              pullback_wait=true;
-              pullback_wait_since=now;
-            }
-            else if (now-pullback_wait_since>=5000U) {
-              m2006_pullback=true;
-            }
+          // Stage 2: M2006 forward to the descent posture, then hold 5 s.
+          // Stage 3 starts only after that hold; no IR check in either part.
+          if (!m2006_descent_hold && out.m2006_relative_rad>=c::HOME_M2006_PULLBACK_RAD) {
+            m2006_descent_hold=true;
+            m2006_descent_since=now;
           }
-          if (m2006_pullback) {
-            if (out.m2006_relative_rad<=c::HOME_M2006_PULLBACK_STOP_RAD) {
-              // Pulled back far enough -> engage the hold (channel 11 goes to 1).
-              m2006_hold_locked=true;
-              m2006_hold_since=now;
-              m2006_hold_angle=f.ma;
-              out.m2006_torque_nm=0.0f;
+          if (m2006_descent_hold) {
+            if (!m2006_pullback && now-m2006_descent_since>=M2006_DESCENT_HOLD_MS) {
+              m2006_pullback=true;
+              m2006_return_since=now;
             }
-            else {
+            if (m2006_pullback) {
+              if (now-m2006_return_since>=M2006_RETURN_MS) {
+                out.stage=Stage::Done;out.homed=true;
+                out.pitch_zero_rad=f.pa;out.m2006_zero_rad=f.ma;
+                m2006_home_done=true;
+                out.pitch_torque_nm=0.0f;out.m2006_torque_nm=0.0f;
+                out.m2006_locked=false;
+                pitch_speed_cmd=0.0f;m_pi={};m_speed_cmd=0.0f;
+                return;
+              }
               out.m2006_torque_nm=-dir*c::HOME_M2006_DRIVE_DIR*c::HOME_M2006_PULLBACK_TORQUE_NM-
                 c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
             }
-          }
-          else if (pullback_wait) {
-            // 5 s dwell at the bottom: no drive, damping only.
-            out.m2006_torque_nm=-c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
+            else {
+              // 5 s dwell at the descent posture: no drive, damping only.
+              out.m2006_torque_nm=-c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
+            }
           }
           else {
             out.m2006_torque_nm=dir*c::HOME_M2006_DRIVE_DIR*tq-
               c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
-          }
-          // Phase B trigger uses the ARM angle: phase A travel + this phase's travel.
-          const float arm_travel=dir*(f.pa-pitch_return_origin);
-          if (arm_travel>=c::HOME_PITCH_RETURN_MOVE_RAD+c::HOME_M2006_CONTINUE_RAD) {
-            m2006_hold_locked=true;
-            m2006_hold_since=now;
-            m2006_hold_angle=f.ma;
           }
         }
         else {
