@@ -156,25 +156,55 @@ struct Controller {
         out.stall_elapsed_ms=now-stall_since;
         if (out.stall_elapsed_ms>=c::HOME_PITCH_STALL_MS) {
           // Stage 1 complete: GM6020 is seated at the rear stop (base).
-          // Stop here and wait for IR<=30cm; M2006 remains released.
+          // Move forward by the default angle before starting IR detection.
           out.pitch_torque_nm=0.0f;pitch_pi={};pitch_speed_cmd=0.0f;
           pitch_return_origin=f.pa;m_origin=f.ma;
           out.pitch_return_relative_rad=0.0f;out.m2006_relative_rad=0.0f;
-          out.pitch_return_target_relative_rad=0.0f;
-          out.stage=Stage::WaitInfrared;entered=now;m_pi={};m_speed_cmd=0.0f;
+          out.pitch_return_target_relative_rad=c::HOME_PITCH_RETURN_MOVE_RAD;
+          out.stage=Stage::MoveDefault;entered=now;m_pi={};m_speed_cmd=0.0f;
         }
       }
       return; // M2006 remains zero for this entire phase.
     }
+    if (out.stage==Stage::MoveDefault) {
+      // Small forward move from the base to the default pose before IR detection.
+      // This reuses the same phase-A angle/motion as the original homing return.
+      const float dir=-c::HOME_PITCH_DIRECTION;
+      const float tq=(std::fabs(f.ms)<c::HOME_M2006_BREAKAWAY_SPEED_RAD_S) ?
+        c::HOME_M2006_BREAKAWAY_TORQUE_NM : c::HOME_M2006_CRUISE_TORQUE_NM;
+      out.pitch_torque_nm=0.0f;
+      out.m2006_torque_nm=dir*c::HOME_M2006_DRIVE_DIR*tq-
+        c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
+      const float travel=dir*(f.pa-pitch_return_origin);
+      out.pitch_return_relative_rad=travel;
+      out.pitch_return_target_relative_rad=c::HOME_PITCH_RETURN_MOVE_RAD;
+      if (travel>=c::HOME_PITCH_RETURN_MOVE_RAD) {
+        pitch_locked=true;
+        pitch_lock_angle=f.pa;
+        m2006_phase_start=f.ma;
+        phaseb_torque=0.0f;
+        out.m2006_torque_nm=0.0f;
+        out.stage=Stage::WaitInfrared;entered=now;
+      }
+      else if (now-entered>=c::HOME_PITCH_RETURN_TIMEOUT_MS) {
+        fault(Fault::MoveTimeout);
+      }
+      return;
+    }
     if (out.stage==Stage::WaitInfrared) {
-      // Stage 1 finished. Hold at the rear stop (zero M2006 torque) until the
-      // IR sensor reports <=30cm, then start the M2006 descent.
-      out.pitch_torque_nm=0.0f;out.m2006_torque_nm=0.0f;
-      out.pitch_return_target_relative_rad=0.0f;
+      // Hold the default pose until IR<=30cm; M2006 stays released.
+      const float err_default=pitch_lock_angle-f.pa;
+      const float hold_default=clamp(c::HOME_PITCH_PHASEB_STIFF_NM_PER_RAD*err_default
+        -c::HOME_PITCH_PHASEB_DAMP_NM_PER_RAD_S*f.ps,
+        -c::HOME_PITCH_PHASEB_MAX_TORQUE_NM,c::HOME_PITCH_PHASEB_MAX_TORQUE_NM);
+      out.pitch_torque_nm=hold_default;
+      phaseb_torque=hold_default;
+      out.m2006_torque_nm=0.0f;
+      out.pitch_return_target_relative_rad=c::HOME_PITCH_RETURN_MOVE_RAD;
       if ((g_data.infrared_valid!=0U) &&
           (g_data.distance_cm<=IR_TRIGGER_DISTANCE_CM)) {
         out.stage=Stage::MovePitch;entered=now;
-        pitch_locked=false;phaseb_torque=0.0f;m_pi={};m_speed_cmd=0.0f;
+        m_pi={};m_speed_cmd=0.0f;
       }
       return;
     }
