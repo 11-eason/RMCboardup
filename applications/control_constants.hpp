@@ -4,8 +4,10 @@
 namespace control_constants
 {
 // Dedicated GIMBAL C-board homing. CAN1 must NOT share ID1 with chassis drives.
-constexpr bool HOME_MODE = true;  // Homing-only debug: no automatic trajectory handoff.
+constexpr bool HOME_MODE = true;  // gimbal homing enabled
 constexpr bool HOME_AUTO_START = true;
+// Temporary RC/CAN diagnosis. false restores the selected power/trajectory plot.
+constexpr bool CHASSIS_CONTROL_DIAGNOSTICS = true;
 constexpr unsigned HOME_PITCH_ID = 2U;
 constexpr unsigned HOME_M2006_ID = 1U;
 constexpr float HOME_PITCH_RATIO = 1.0f;
@@ -13,7 +15,7 @@ constexpr float HOME_M2006_RATIO = 36.0f;  // Output-shaft angle/speed/torque.
 constexpr float HOME_PITCH_DIRECTION = 1.0f; // Observed positive motion approaches the rear stop.
 
 // Initial trial settings, not a mechanical rating or a tuned controller.
-constexpr float HOME_PITCH_SEEK_SPEED_RAD_S = 0.35f;
+constexpr float HOME_PITCH_SEEK_SPEED_RAD_S = 0.35f;  // reverted  // seek crawl speed: 0.35 -> 0.80
 constexpr float HOME_PITCH_SPEED_KP = 0.08f;  // tau = J/Kp = 12.5ms（原 0.25 下 4ms，与 2ms 周期接近会自激）
 constexpr float HOME_PITCH_SPEED_KI = 0.45f;  // 与 hold 段一致
 constexpr float HOME_PITCH_MAX_TORQUE_NM = 0.40f;  // 顶挡块力矩：0.50 太高，硬顶会嗡嗡震动
@@ -30,20 +32,21 @@ constexpr float HOME_PITCH_MAX_TRAVEL_RAD = 1.570796327f; // Software search cap
 
 // After rear-stop detection, GM6020 reverses relative to its own seated angle.
 // M2006 remains zero-current until the GM6020 return is complete and stationary.
-constexpr float HOME_PITCH_RETURN_MOVE_RAD = 0.5235987756f; // GM6020 shaft 30 deg backoff. // GM6020 shaft 15 deg backoff.
+constexpr float HOME_PITCH_RETURN_MOVE_RAD = 0.3490658504f;  // 20 deg first phase  // 15 deg backoff driven by the M2006 // GM6020 shaft 30 deg backoff. // GM6020 shaft 15 deg backoff.
 constexpr unsigned HOME_PITCH_RETURN_RELEASE_MS = 100U;   // Clear rearward current first.
-constexpr float HOME_PITCH_RETURN_POSITION_KP = 3.0f;
+constexpr float HOME_PITCH_RETURN_POSITION_KP = 3.0f;  // reverted  // return position gain: 3.0 -> 5.0 (reach the limit sooner)
 constexpr float HOME_PITCH_RETURN_SPEED_KP = 0.08f;  // 同上，回退段不再自激
 constexpr float HOME_PITCH_RETURN_SPEED_KI = 0.45f;  // 同上
 constexpr float HOME_PITCH_RETURN_MAX_TORQUE_NM = 0.80f;
-constexpr float HOME_PITCH_RETURN_MAX_SPEED_RAD_S = 0.35f;
-constexpr unsigned HOME_PITCH_RETURN_TIMEOUT_MS = 8000U;
+constexpr float HOME_PITCH_RETURN_MAX_SPEED_RAD_S = 0.35f;  // reverted  // return speed: 0.35 -> 0.80
+constexpr unsigned HOME_PITCH_RETURN_TIMEOUT_MS = 20000U;  // phase A + phase B are slow; 8 s was too short
 // After entering Done, wait this long then freeze the ACHIEVED pose as the final zero
 // (stage 4 for 500 ms -> lock). No further fine correction of the zero point.
-constexpr unsigned HOME_LOCK_MS = 250U;
+constexpr unsigned HOME_LOCK_MS = 500U;
+constexpr unsigned HOME_M2006_LOCK_MS = 500U;  // 0.5 s hold after the M2006 arrives, then lock  // lock 0.5 s after entering Done
 // Hold deadband: inside this band the controller only damps (speed target 0)
 // and makes NO position correction, so the gimbal stops hunting.
-constexpr float HOME_PITCH_HOLD_DEADBAND_RAD = 0.06981317f;  // 4 deg  // lock 250 ms after entering Done
+constexpr float HOME_PITCH_HOLD_DEADBAND_RAD = 0.0f;  // no deadband: stiff hold  // 4 deg  // lock 250 ms after entering Done
 // Second homing stage: after the 6020 locks, the M2006 rotates this much as its final zero.
 constexpr float HOME_M2006_FINAL_ROT_RAD = 0.5235987756f;  // 30 deg
 constexpr float HOME_M2006_FINAL_ROT_DIR = 1.0f;           // flipped: -1.0 pushed into a stop          // same sense as the 6020 return; flip to +1 if wrong           // +1 or -1; flip if it goes the wrong way
@@ -52,27 +55,51 @@ constexpr float HOME_PITCH_RETURN_TOLERANCE_RAD = 0.034906585f;  // 2 deg settle
 constexpr float HOME_PITCH_RETURN_SETTLE_SPEED_RAD_S = 0.15f; // Tolerate 1 rpm quantization.
 constexpr unsigned HOME_PITCH_RETURN_SETTLE_MS = 250U;
 constexpr float HOME_PITCH_RETURN_OVERSHOOT_RAD = 0.261799388f; // 15 deg past target.
-constexpr float HOME_TARGET_ACCEL_RAD_S2 = 0.50f;
+constexpr float HOME_TARGET_ACCEL_RAD_S2 = 0.5f;  // reverted: 2.0 broke the stall detection  // speed ramp: was 0.5 (very slow)
 
 // Final GM6020 hold uses the same 60-degree target; preserve its load integral.
 // M2006 captures and holds its ACTUAL final angle, without a separate 60-degree demand.
 constexpr bool HOME_HOLD_AFTER_DONE = true;
-constexpr float HOME_PITCH_HOLD_POSITION_KP = 3.0f;
+constexpr float HOME_PITCH_HOLD_POSITION_KP = 10.0f;  // was 3.0: much stiffer
 constexpr float HOME_PITCH_HOLD_SPEED_KP = 0.08f;
 constexpr float HOME_PITCH_HOLD_SPEED_KI = 0.45f;
-constexpr float HOME_PITCH_HOLD_MAX_SPEED_RAD_S = 0.25f;
-constexpr float HOME_PITCH_HOLD_MAX_TORQUE_NM = 0.80f;
-constexpr float HOME_M2006_POSITION_KP = 1.0f;  // lowered from 4.0: avoid fighting the 6020 hold
+constexpr float HOME_PITCH_HOLD_MAX_SPEED_RAD_S = 2.0f;  // was 0.25: allow a hard push
+constexpr float HOME_PITCH_HOLD_MAX_TORQUE_NM = 2.20f;  // GM6020 absolute max; this is the ceiling  // final lock: near GM6020 max
+// Weak lock used only between phase A and phase B, so the M2006 translation
+// can still drag the axis a little.
+constexpr float HOME_PITCH_PHASEB_MAX_TORQUE_NM = 0.30f;
+constexpr float HOME_PITCH_PHASEB_STIFF_NM_PER_RAD = 20.0f;  // must stay below the M2006 drive (0.45) or phase B stalls
+// Direct position->torque stiffness for the locked pose (a hard virtual spring).
+// 60 Nm/rad means a 1 deg error already commands ~1 Nm; the torque limit caps it.
+constexpr float HOME_PITCH_HOLD_STIFF_NM_PER_RAD = 100.0f;  // final lock stiffness: 1 deg -> 1.75 Nm  // final lock stiffness  // softer spring: yields to the M2006 translation
+// Constant torque used to drive the backoff and the M2006 final rotation.
+// Angle-triggered, no speed loop -> no vibration.
+constexpr float HOME_PITCH_RETURN_TORQUE_NM = 0.80f;  // 0.30 was not enough to move the axis
+constexpr float HOME_M2006_FINAL_TORQUE_NM = 0.15f;
+// Two-level drive: a larger torque to break static friction, a small one to cruise.
+// A single value cannot satisfy both (0.15 did not move, 0.80 ran away).
+constexpr float HOME_M2006_BREAKAWAY_TORQUE_NM = 0.45f;  // within M2006 capability  // raised for phase B
+constexpr float HOME_M2006_CRUISE_TORQUE_NM = 0.18f;  // slow crawl  // more headroom against damping
+// Damping: brake torque proportional to the axis speed. Without it gravity can
+// accelerate the mechanism past the point of control and the overspeed trip fires.
+constexpr float HOME_M2006_DAMPING_NM_PER_RAD_S = 0.30f;  // caps the axis speed near 0.6 rad/s  // 0.15 cancelled the cruise torque at 1.3 rad/s  // raised so phase B keeps moving
+constexpr float HOME_M2006_BREAKAWAY_SPEED_RAD_S = 0.06f;  // 0.80 was a runaway; gearbox torque is large
+// Sign of the M2006 drive torque. -1 means it pushes along +HOME_PITCH_DIRECTION.
+// If the axis does not move (or pushes into the stop), flip this to +1.
+constexpr float HOME_M2006_DRIVE_DIR = -1.0f;  // flipped: previous sign pushed into the stop  // gearbox gives headroom: was 0.45 (25% of axis max)  // constant torque used for both M2006 moves
+// After the 15 deg backoff the 6020 locks, then the M2006 keeps turning 45 deg more.
+constexpr float HOME_M2006_CONTINUE_RAD = 0.5235987756f;  // 30 deg instead of 45 deg  // max available for the M2006 path  // was 0.80: near GM6020 max (2.2 Nm)
+constexpr float HOME_M2006_POSITION_KP = 3.0f;  // final M2006 hold: 3.0 (was 1.0)  // lowered from 4.0: avoid fighting the 6020 hold
 constexpr float HOME_M2006_SPEED_KP = 0.10f;
 // 回退阶段: M2006 转速 = FOLLOW × 6020转速。不锁死（仍能动），但保持柄结构一致，
 // 避免 M2006 完全自由时重力把 pitch 总成拖回挡块。正负号决定方向，反了就改成负值。
 constexpr float HOME_M2006_RETURN_FOLLOW = -1.0f;  // flipped sign: try -1 first, then 0.5 / 2.0
 // Deadband for the M2006 hold: inside this error band the M2006 stays passive,
 // so it does not fight the 6020 through the linkage (removes the small oscillation).
-constexpr float HOME_M2006_HOLD_DEADBAND_RAD = 0.06981317f;  // 4 deg  // 0 = 关闭该功能
+constexpr float HOME_M2006_HOLD_DEADBAND_RAD = 0.0f;  // no deadband: both axes hard-held at the end  // 4 deg  // 0 = 关闭该功能
 constexpr float HOME_M2006_SPEED_KI = 0.40f;
-constexpr float HOME_M2006_MAX_TORQUE_NM = 0.45f; // HOLD only, never used during return.
-constexpr float HOME_M2006_MAX_SPEED_RAD_S = 0.35f;
+constexpr float HOME_M2006_MAX_TORQUE_NM = 1.00f;  // M2006 output-shaft hardware maximum  // M2006 axis max: the gearbox can also hold the pitch  // allow the M2006 path up to 1.2 Nm on the axis // HOLD only, never used during return.
+constexpr float HOME_M2006_MAX_SPEED_RAD_S = 0.35f;  // reverted  // M2006 axis speed: 0.35 -> 0.80
 constexpr float HOME_M2006_SETTLE_SPEED_RAD_S = 0.05f;
 // Append torque diagnostics to the existing six homing plot channels.
 constexpr bool HOME_PLOT_TORQUES = true; // true: 10 float channels; false: original 6.
@@ -82,7 +109,10 @@ constexpr unsigned HOME_FEEDBACK_TIMEOUT_MS = 100U;
 constexpr unsigned HOME_MAX_STEP_MS = 10U;
 constexpr unsigned HOME_CAN_INTERVAL_MS = 5U;
 constexpr unsigned HOME_COMMAND_TIMEOUT_MS = 20U;
-constexpr float HOME_OVERSPEED_RAD_S = 2.0f;
+constexpr float HOME_OVERSPEED_RAD_S = 8.0f;  // homing only: gravity can back-drive the axis, 2.0 was too tight
+// Separate overspeed trip for the M2006 path: its axis travels far and gravity
+// can accelerate it well past the GM6020 figure, which is not a real fault.
+constexpr float HOME_M2006_OVERSPEED_RAD_S = 8.0f;
 static_assert(HOME_PITCH_HOLD_POSITION_KP > 0.0f && HOME_PITCH_HOLD_SPEED_KP > 0.0f &&
               HOME_PITCH_HOLD_SPEED_KI >= 0.0f && HOME_PITCH_HOLD_MAX_SPEED_RAD_S > 0.0f &&
               HOME_PITCH_HOLD_MAX_TORQUE_NM > 0.0f && HOME_PITCH_HOLD_MAX_TORQUE_NM <= 0.741f * 3.0f,
@@ -141,18 +171,30 @@ static_assert(INFRARED_RAW_TO_CM > 0.0f, "Invalid distance unit conversion");
 //   录一段真正跑到 90~100 W 的数据重新拟合，再用 3~4 W 裕量。
 // K2 must be calibrated in the actual shaft-speed coordinates.
 // Rotor-to-output conversion multiplies the speed-squared coefficient by ratio^2.
-constexpr float POWER_K1 = 2.03f;   // W / (N*m)^2
-constexpr float POWER_K2 = 0.009f;  // W / (rad/s)^2
-constexpr float POWER_K3 = 4.1f;    // W, 整机空载损耗
+constexpr float POWER_K1 = 2.80f;  // bias-era coefficient  // bias-era coefficient   // W / (N*m)^2
+constexpr float POWER_K2 = 0.009f;  // bias-era coefficient  // bias-era coefficient  // W / (rad/s)^2
+constexpr float POWER_K3 = 4.0f;  // bias-era coefficient
+// ---- Measured-power slow correction (bias model) ----
+// effective limit = (limit - margin) x bias, bias in [MIN, MAX], regulated on the
+// low-pass filtered measured power so the mean sits on the limit.
+constexpr float POWER_BIAS_DOWN_PER_W = 5e-5f;
+constexpr float POWER_BIAS_UP_PER_W = 2e-5f;
+constexpr float POWER_BIAS_MIN = 0.6f;
+constexpr float POWER_BIAS_MAX = 1.3f;
+constexpr float POWER_BIAS_RECOVER_BAND_W = 2.0f;
+constexpr float POWER_BIAS_FILTER_S = 0.3f;
+constexpr float POWER_MECH_LOSS_RATIO = 0.25f;  // transmission/ESC loss
+constexpr float POWER_RESERVE_LEAD_S = 0.05f;
+constexpr float POWER_RESERVE_MAX_W = 15.0f;  // bias-era coefficient    // W, 整机空载损耗
 
 constexpr bool POWER_MODEL_CALIBRATED = false;
 
-constexpr float CHASSIS_POWER_LIMIT_W = 80.0f;
+constexpr float CHASSIS_POWER_LIMIT_W = 80.0f;  // hard limit  // restored: real 80 W limit  // temporarily raised: compare prediction vs measured without limiting
 // Measured-power PI target = LIMIT - MARGIN; model budget = target + bounded PI trim.
 // 标定后模型误差只有 ±1.5 W（最大 6.5 W），所以裕量可以从 8 W 降回 4 W：
 //   限幅点 76 W，均值贴 76，峰值约 80~82。
 // 想更激进用 3；想更保守用 5~6。
-constexpr float POWER_LIMIT_MARGIN_W = 2.0f;
+constexpr float POWER_LIMIT_MARGIN_W = 8.0f;  // nominal budget 72 W  // limit target 77 W (80 - 3)  // bias-era margin (target 72 W)
 static_assert(CHASSIS_POWER_LIMIT_W > 0.0f, "Power limit must be positive");
 static_assert(
   POWER_LIMIT_MARGIN_W >= 0.0f && POWER_LIMIT_MARGIN_W < CHASSIS_POWER_LIMIT_W,
@@ -220,7 +262,7 @@ constexpr float FOLLOW_PITCH_DIRECTION = 1.0f;
 
 // ---- 运行模式 ----
 // false = 两轴都跟随（当前测 pitch 需要它，否则 pitch 力矩恒为 0）
-constexpr bool FOLLOW_SINGLE_YAW = false;
+constexpr bool FOLLOW_SINGLE_YAW = true;  // yaw-only test: no pitch feedback required
 // 恒力矩台架测试：不做闭环，只输出固定力矩（测静摩擦、确认转向）。测完必须改回 false。
 // 【方向符号已验证：正力矩 → 实际角度增大，符号正确，DIRECTION 保持 1.0】
 constexpr bool FOLLOW_CONSTANT_TORQUE_TEST = false;
@@ -230,8 +272,7 @@ constexpr float FOLLOW_TEST_TRIP_SPEED_RAD_S = 5.23598776f;  // 50 rpm，超速�
 constexpr bool FOLLOW_ENFORCE_ANGLE_LIMITS = false;
 // 时间缩放：1 = 原始 680 ms 周期（最快）；2/4 = 放慢并同时降低速度、加速度。
 constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 2U;  // 1360 ms/圈（缩放 4 已验证 OK，提速一档）
-constexpr bool FOLLOW_START_ENABLED =
-  false;  // Start yaw tracking after fresh feedback and pose capture.
+constexpr bool FOLLOW_START_ENABLED = false;  // homing only: do NOT auto-start following  // Start yaw tracking after fresh feedback and pose capture.
 constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE = true;  // 上电自动记录初始姿态
 constexpr bool FOLLOW_USE_RC_STOP = false;               // 用遥控器右拨杆下档急停
 
@@ -348,10 +389,10 @@ constexpr unsigned FOLLOW_HOMING_BACKOFF_TIMEOUT_MS = 3000U;  // 回退超时（
 // 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw 2通道，双轴4通道），
 // 2 = 原始参考，3 = 底盘诊断（FL 目标速度 / 实际速度 / 力矩 / 静止释放标志），
 // 4 = 功率模型标定（Στω / Στ²×100 / Σω²÷20 / 实测功率）
-constexpr unsigned FOLLOW_PLOT_MODE = 5U;
-constexpr bool FOLLOW_YAW_DIAGNOSTICS = true;  // 当前：双轴反馈帧数诊断（查 pitch 电机是否在线）
+constexpr unsigned FOLLOW_PLOT_MODE = 0U;
+constexpr bool FOLLOW_YAW_DIAGNOSTICS = false;  // 当前：双轴反馈帧数诊断（查 pitch 电机是否在线）
 // 模式 1 画哪根轴：0 = yaw（目标/实际），1 = pitch（目标/实际）
-constexpr unsigned FOLLOW_PLOT_AXIS = 1U;
+constexpr unsigned FOLLOW_PLOT_AXIS = 0U;
 
 static_assert(
   FOLLOW_YAW_MOTOR_ID >= 1U && FOLLOW_YAW_MOTOR_ID <= 4U && FOLLOW_PITCH_MOTOR_ID >= 1U &&

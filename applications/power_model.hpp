@@ -17,11 +17,12 @@ struct MotorState
 struct Prediction
 {
   float mechanical_w;
+  float mech_loss_w;  // Transmission/ESC loss = ratio * |mechanical_w| (bias-era model).
   float torque_loss_w;
   float speed_loss_w;
   float idle_loss_w;
-  float torque_sq_sum;  // Στ²，供标定使用（原始量，未乘 K1）
-  float speed_sq_sum;   // Σω²，供标定使用（原始量，未乘 K2）
+  float torque_sq_sum;  // sum(tau^2), calibration plots only.
+  float speed_sq_sum;   // sum(omega^2), calibration plots only.
   float total_w;  // Electrical consumption estimate, clamped to >= 0 W.
   bool valid;  // Finite inputs/parameters/results AND all feedback fresh.
   bool calibrated;  // Independent of valid: initial coefficients are uncalibrated.
@@ -36,26 +37,26 @@ struct LimitResult
   Prediction before;
   Prediction after;
   float torque_scale;   // K in [0, 1]; calculated each cycle, not a tuning constant.
-  float limit_w;              // Measured-power PI reference: hard limit - margin.
-  float effective_limit_w;    // Model budget = reference + bounded PI trim.
-  float pi_trim_w;
-  float pi_integral_w;
-  float measured_filtered_w;
+  float limit_w;              // Nominal budget = hard limit - margin.
+  float effective_limit_w;    // limit_w * bias - reserve.
+  float pi_trim_w;            // Equivalent bias correction in watts (diagnostics).
+  float pi_integral_w;        // Unused by the bias model; kept for plotting code.
+  float measured_filtered_w;  // Low-passed measured power (bias regulation input).
   float measured_rise_w_s;
   float measured_forecast_w;
-  float trend_scale;          // Single fast guard; independent of PI trim.
-  uint32_t meter_interval_ms; // Most recent new-meter-frame interval (not plot period).
-  bool fast_over_limit;       // Current fresh raw reading exceeds hard limit.
+  float trend_scale;          // Always 1.0 in the bias model.
+  uint32_t meter_interval_ms;
+  bool fast_over_limit;       // Raw reading already above the hard limit.
+  float meter_bias;           // Slow multiplicative correction, in [MIN, MAX].
   bool limited;
   bool feasible;  // False on invalid input or no feasible uniform scale.
-  bool meter_used;  // 本次是否用上了实测功率（功率计有效时）
+  bool meter_used;  // True when the measured power was usable this cycle.
 };
 
 // Finds the largest feasible uniform torque scale. Does not alter the inputs.
 // Invalid feedback/model: returns scale 0. If no scale can meet the limit,
 // returns the scale minimizing model power and reports feasible=false.
-// Measured-power PI/fast guard use the frame timestamp and frame counter.
-// Missing/stale meter feedback falls back to the uncorrected model budget.
+// Extra arguments are accepted for compatibility with existing callers.
 LimitResult limit(
   const MotorState (&motors)[MOTOR_COUNT], bool feedback_valid, float measured_power_w = 0.0f,
   bool power_measured_valid = false, uint32_t meter_stamp_ms = 0,
@@ -63,7 +64,6 @@ LimitResult limit(
 extern LimitResult g_limit_result;
 
 // Latest prediction BEFORE limiting, updated also for zero-command mode.
-// Intended for debugger inspection; no synchronized cross-task snapshot is provided.
 extern Prediction g_prediction;
 }  // namespace chassis_power
 
