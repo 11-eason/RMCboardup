@@ -52,6 +52,7 @@ constexpr uint8_t FAULT_OVERSPEED = 2;
 constexpr uint8_t FAULT_FEEDBACK = 3;
 constexpr uint8_t FAULT_TIMING = 4;
 constexpr uint8_t FAULT_CONFIG = 5;
+constexpr uint8_t FAULT_IMU = 6;
 
 struct Result
 {

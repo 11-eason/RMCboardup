@@ -55,6 +55,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/applications/trajectory_task.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/applications/trajectory_follow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/applications/homing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/applications/pitch_start.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/applications/gimbal_can.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/applications/grading.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/applications/gimbal_imu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/applications/bmi088_simple.c
 
     # ==== sp_middleware ====
     ${CMAKE_CURRENT_SOURCE_DIR}/sp_middleware/io/led/led.cpp

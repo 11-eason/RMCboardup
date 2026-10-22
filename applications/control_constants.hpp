@@ -3,9 +3,45 @@
 
 namespace control_constants
 {
-// Dedicated GIMBAL C-board homing. CAN1 must NOT share ID1 with chassis drives.
-constexpr bool HOME_MODE = true;  // gimbal homing enabled
-constexpr bool HOME_AUTO_START = true;
+// Independent motor-test programs. true starts ONLY that program at power-on.
+// Both false: neither test runs; tracking uses FOLLOW_START_ENABLED below.
+// A finished/faulted test never automatically starts the other test or tracking.
+constexpr bool HOMING_ENABLED = false;
+constexpr bool PITCH_START_ENABLED = true;
+static_assert(
+  !(HOMING_ENABLED && PITCH_START_ENABLED),
+  "Enable only one motor test: HOMING_ENABLED or PITCH_START_ENABLED (shared motors/CAN frames)");
+
+// BMI088 on the moving gimbal C-board. All angles/rates are radians.
+constexpr unsigned IMU_WARMUP_MS = 3000U;
+constexpr unsigned IMU_CALIBRATION_MS = 2000U;
+// Calibrate for real elapsed time; task executions are not milliseconds.
+constexpr unsigned IMU_CALIBRATION_MIN_SAMPLES = 500U;
+constexpr bool IMU_STARTUP_DIAGNOSTICS = true;  // 12 plot channels; false restores 3.
+constexpr unsigned IMU_MAX_GAP_MS = 10U;
+constexpr float IMU_CALIBRATION_MAX_RATE_RAD_S = 0.052359878f;  // 3 deg/s
+// Whole-window standard deviation and 100ms block-mean spread (startup only).
+constexpr float IMU_CALIBRATION_STD_RAD_S = 0.0052359878f;  // 0.30 deg/s
+constexpr unsigned IMU_CALIBRATION_BLOCK_MS = 100U;
+constexpr float IMU_CALIBRATION_MEAN_SPREAD_RAD_S = 0.013962634f;  // 0.8 deg/s
+static_assert(
+  IMU_CALIBRATION_STD_RAD_S > 0.0f && IMU_CALIBRATION_BLOCK_MS > 0U,
+  "Invalid IMU calibration noise configuration");
+constexpr float IMU_ATTITUDE_KP = 0.5f;
+constexpr float IMU_YAW_DIRECTION = 1.0f;
+constexpr float IMU_PITCH_DIRECTION = 1.0f;
+// Existing middleware C-board convention: board flat, CAN side facing forward.
+// Horizontal mounting heading does not affect relative yaw. Verify this matrix
+// before pitch tests: rows are gimbal X(forward), Y(left), Z(up) in sensor axes.
+constexpr float IMU_SENSOR_TO_GIMBAL[3][3] = {
+  {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+static_assert(IMU_MAX_GAP_MS <= 10U && IMU_CALIBRATION_MS > 0U, "Invalid IMU timing");
+static_assert(
+  (IMU_YAW_DIRECTION == 1.0f || IMU_YAW_DIRECTION == -1.0f) &&
+    (IMU_PITCH_DIRECTION == 1.0f || IMU_PITCH_DIRECTION == -1.0f),
+  "Invalid IMU directions");
+
+// Shared GM6020/M2006 test parameters below; each program owns its own stop logic.
 // Temporary RC/CAN diagnosis. false restores the selected power/trajectory plot.
 constexpr bool CHASSIS_CONTROL_DIAGNOSTICS = true;
 constexpr unsigned HOME_PITCH_ID = 2U;
@@ -38,7 +74,7 @@ constexpr float HOME_PITCH_MAX_TRAVEL_RAD = 1.570796327f;  // Software search ca
 // After rear-stop detection, GM6020 reverses relative to its own seated angle.
 // M2006 remains zero-current until the GM6020 return is complete and stationary.
 constexpr float HOME_PITCH_RETURN_MOVE_RAD =
-  0.3490658504f;  // phase A lift: 20 deg  // phase A lift: 25 deg (was 20)  // 20 deg first phase  // 15 deg backoff driven by the M2006 // GM6020 shaft 30 deg backoff. // GM6020 shaft 15 deg backoff.
+  0.4363323130f;  // phase A lift: 20 deg  // phase A lift: 25 deg (was 20)  // 20 deg first phase  // 15 deg backoff driven by the M2006 // GM6020 shaft 30 deg backoff. // GM6020 shaft 15 deg backoff.
 constexpr unsigned HOME_PITCH_RETURN_RELEASE_MS = 100U;  // Clear rearward current first.
 constexpr float HOME_PITCH_RETURN_POSITION_KP =
   3.0f;  // reverted  // return position gain: 3.0 -> 5.0 (reach the limit sooner)
@@ -76,7 +112,7 @@ constexpr float HOME_TARGET_ACCEL_RAD_S2 =
 
 // Final GM6020 hold uses the same 60-degree target; preserve its load integral.
 // M2006 captures and holds its ACTUAL final angle, without a separate 60-degree demand.
-constexpr bool HOME_HOLD_AFTER_DONE = true;
+constexpr bool HOME_HOLD_AFTER_DONE = false;
 constexpr float HOME_PITCH_HOLD_POSITION_KP = 10.0f;  // was 3.0: much stiffer
 constexpr float HOME_PITCH_HOLD_SPEED_KP =
   0.08f;  // reverted  // damping raised (tau = J/Kp = 6.7 ms, > 2 ms CAN period)
@@ -88,7 +124,8 @@ constexpr float HOME_PITCH_HOLD_MAX_TORQUE_NM =
 // Weak lock used only between phase A and phase B, so the M2006 translation
 // can still drag the axis a little.
 constexpr float HOME_PITCH_PHASEB_MAX_TORQUE_NM = 0.38f;  // 0.30 did not hold this time
-constexpr float HOME_PITCH_PHASEB_STIFF_NM_PER_RAD = 5.0f;  // 30 -> 5: much softer, less fight with the M2006 (less rocking)
+constexpr float HOME_PITCH_PHASEB_STIFF_NM_PER_RAD =
+  5.0f;  // 30 -> 5: much softer, less fight with the M2006 (less rocking)
 // Damping for the phase-B spring: without it the pure spring oscillates.
 constexpr float HOME_PITCH_PHASEB_DAMP_NM_PER_RAD_S =
   0.08f;  // scaled down with the stiffness  // matching stiffness  // must stay below the M2006 drive (0.45) or phase B stalls
@@ -106,14 +143,15 @@ constexpr float HOME_PITCH_RETURN_TORQUE_NM = 0.80f;  // 0.30 was not enough to 
 constexpr float HOME_M2006_FINAL_TORQUE_NM = 0.15f;
 // Two-level drive: a larger torque to break static friction, a small one to cruise.
 // A single value cannot satisfy both (0.15 did not move, 0.80 ran away).
-constexpr float HOME_M2006_BREAKAWAY_TORQUE_NM = 0.5;
-constexpr float HOME_M2006_CRUISE_TORQUE_NM = 0.18f;
+constexpr float HOME_M2006_BREAKAWAY_TORQUE_NM = 0.65f;  // 0.45 -> 0.60: cannot pull the structure
+constexpr float HOME_M2006_CRUISE_TORQUE_NM = 0.28f;     // 0.18 -> 0.26
 // When the M2006 reaches HOME_M2006_PULLBACK_RAD it reverses and pulls the gimbal
 // back with this (larger) torque.
-constexpr float HOME_M2006_PULLBACK_RAD = 2.40f;
-constexpr float HOME_M2006_PULLBACK_TORQUE_NM = 0.90f;
+constexpr float HOME_M2006_PULLBACK_RAD = 2.2f;
+constexpr float HOME_M2006_PULLBACK_TORQUE_NM = 1.0f;  // 0.90 -> 1.00 (M2006 output limit)
 // Pull back until the M2006 relative angle falls to this value, then lock.
-constexpr float HOME_M2006_PULLBACK_STOP_RAD = 0.0f;  // pull back to the stop pose (relative 0)  // slow version  // 0.18 -> 0.22  // slow crawl  // more headroom against damping
+constexpr float HOME_M2006_PULLBACK_STOP_RAD =
+  0.0f;  // pull back to the stop pose (relative 0)  // slow version  // 0.18 -> 0.22  // slow crawl  // more headroom against damping
 // Damping: brake torque proportional to the axis speed. Without it gravity can
 // accelerate the mechanism past the point of control and the overspeed trip fires.
 constexpr float HOME_M2006_DAMPING_NM_PER_RAD_S =
@@ -127,8 +165,7 @@ constexpr float HOME_M2006_DRIVE_DIR =
 // After the 15 deg backoff the 6020 locks, then the M2006 keeps turning 45 deg more.
 constexpr float HOME_M2006_CONTINUE_RAD =
   0.3490658504f;  // phase B: 20 deg more (arm angle)  // phase B: 30 deg  // 30 deg instead of 45 deg  // max available for the M2006 path  // was 0.80: near GM6020 max (2.2 Nm)
-constexpr float HOME_M2006_POSITION_KP =
-  3.0f;
+constexpr float HOME_M2006_POSITION_KP = 3.0f;
 // Done-stage M2006 hold is DAMPING ONLY: the position loop hunted through the
 // lead-screw backlash and rocked the whole pitch axis.
 constexpr float HOME_M2006_HOLD_DAMP_NM_PER_RAD_S = 0.30f;
@@ -136,7 +173,8 @@ constexpr float HOME_M2006_HOLD_DAMP_NM_PER_RAD_S = 0.30f;
 // The M2006 uses a wide deadband so lead-screw backlash cannot start a hunt.
 constexpr float HOME_M2006_FINAL_STIFF_NM_PER_RAD = 6.0f;
 constexpr float HOME_M2006_FINAL_DAMP_NM_PER_RAD_S = 0.20f;
-constexpr float HOME_M2006_FINAL_DEADBAND_RAD = 0.08f;  // final M2006 hold: 3.0 (was 1.0)  // lowered from 4.0: avoid fighting the 6020 hold
+constexpr float HOME_M2006_FINAL_DEADBAND_RAD =
+  0.08f;  // final M2006 hold: 3.0 (was 1.0)  // lowered from 4.0: avoid fighting the 6020 hold
 constexpr float HOME_M2006_SPEED_KP = 0.10f;
 // 回退阶段: M2006 转速 = FOLLOW × 6020转速。不锁死（仍能动），但保持柄结构一致，
 // 避免 M2006 完全自由时重力把 pitch 总成拖回挡块。正负号决定方向，反了就改成负值。
@@ -320,7 +358,7 @@ constexpr float FOLLOW_PITCH_DIRECTION = 1.0f;
 
 // ---- 运行模式 ----
 // false = 两轴都跟随（当前测 pitch 需要它，否则 pitch 力矩恒为 0）
-constexpr bool FOLLOW_SINGLE_YAW = true;  // yaw-only test: no pitch feedback required
+constexpr bool FOLLOW_SINGLE_YAW = false;  // yaw-only test: no pitch feedback required
 // 恒力矩台架测试：不做闭环，只输出固定力矩（测静摩擦、确认转向）。测完必须改回 false。
 // 【方向符号已验证：正力矩 → 实际角度增大，符号正确，DIRECTION 保持 1.0】
 constexpr bool FOLLOW_CONSTANT_TORQUE_TEST = false;
@@ -331,7 +369,7 @@ constexpr bool FOLLOW_ENFORCE_ANGLE_LIMITS = false;
 // 时间缩放：1 = 原始 680 ms 周期（最快）；2/4 = 放慢并同时降低速度、加速度。
 constexpr unsigned FOLLOW_TRAJECTORY_TIME_SCALE = 2U;  // 1360 ms/圈（缩放 4 已验证 OK，提速一档）
 constexpr bool FOLLOW_START_ENABLED =
-  false;  // homing only: do NOT auto-start following  // Start yaw tracking after fresh feedback and pose capture.
+  false;  // pitch_start test: yaw follow off  // Auto-start yaw after fresh feedback and initial pose capture.
 constexpr bool FOLLOW_AUTO_CAPTURE_INITIAL_POSE = true;  // 上电自动记录初始姿态
 constexpr bool FOLLOW_USE_RC_STOP = false;               // 用遥控器右拨杆下档急停
 
@@ -340,7 +378,8 @@ constexpr unsigned FOLLOW_PERIOD_MS = 1U;  // 控制周期 1 ms
 // 电流帧发送周期 = 执行器的采样周期。电机只在收到新帧时更新力矩，
 // 所以闭环时间常数 τ 必须 ≥ 5~10 倍这个值，否则采样环自激（嗡嗡响）。
 // 取 2 ms（500 Hz）是总线负载与带宽的折中；总线余量足够时可试 1 ms。
-constexpr unsigned FOLLOW_CAN_TX_INTERVAL_MS = 2U;
+constexpr unsigned FOLLOW_CAN_TX_INTERVAL_MS =
+  1U;  // 2 -> 1 ms: closes the loop twice as fast (control only)
 constexpr unsigned FOLLOW_COMMAND_TIMEOUT_MS = 20U;
 constexpr unsigned FOLLOW_FEEDBACK_TIMEOUT_MS = 100U;
 constexpr unsigned FOLLOW_MAX_STEP_MS = 10U;  // 调度间隔超过它就重新初始化 PID
@@ -358,18 +397,22 @@ constexpr float FOLLOW_PITCH_ACCEL_FF_J = 0.0f;
 constexpr float FOLLOW_PITCH_GRAVITY_NM = 0.0f;  // m·g·r
 // 库仑摩擦前馈（N·m）。裸电机实测启动摩擦约 0.1 A ≈ 0.074 N·m；
 // 取 0.05 既能把低速"粘住"补掉，又不会在停顿反向点造成震动（实测最优）。
-constexpr float FOLLOW_YAW_FRICTION_NM = 0.05f;
+constexpr float FOLLOW_YAW_FRICTION_NM =
+  0.05f;  // revert: 0.07 was worse  // 0.05 -> 0.07  // back to the 0.237 best  // 0.05 -> 0.10: must break stiction at the reversal notch  // restored: removing it dropped the score 0.237 -> 0.168  // test: friction feedforward off, to check half-cycle asymmetry
 constexpr float FOLLOW_PITCH_FRICTION_NM = 0.05f;
 // 平滑符号函数的过渡带（rad/s）：信号小于它时前馈按比例减小，避免过零抖动
-constexpr float FOLLOW_FRICTION_BLEND_RAD_S = 0.02f;
+constexpr float FOLLOW_FRICTION_BLEND_RAD_S =
+  0.02f;  // revert: 0.05 was worse  // 0.02 -> 0.05: wider blend = smoother at each of the 3 reversals
 // 摩擦前馈方向信号的低通时间常数（s）。轨迹每周期有 6 个"停住再反向"的点，
 // 速度指令会在零点逐拍抖动；直接取符号会让力矩每拍翻转 ±τ_c → 震动。
 // 先低通再取符号，前馈变成缓变的 ±τ_c，震动消失而补偿能力基本保留。设 0 = 不滤波。
 constexpr float FOLLOW_FRICTION_FILTER_S = 0.03f;
 // 静摩擦脱困（带滞环的辅助力矩）：误差 > ON 且几乎不动 → 沿误差方向补 τ_c；
 // 误差 < OFF 或已经动起来 → 撤销。设为 0 即关闭（当前关闭，改用摩擦前馈）。
-constexpr float FOLLOW_BREAKAWAY_ON_RAD = 0.0f;
-constexpr float FOLLOW_BREAKAWAY_OFF_RAD = 0.010f;
+constexpr float FOLLOW_BREAKAWAY_ON_RAD =
+  0.0f;  // disabled again: the kick fired at every peak and added error  // 0 -> 0.015 rad (0.86 deg): ENABLE the anti-stiction kick
+constexpr float FOLLOW_BREAKAWAY_OFF_RAD =
+  0.010f;  // original value  // 0.010 -> 0.006: must be below ON
 constexpr float FOLLOW_BREAKAWAY_SPEED_RAD_S = 0.15f;
 
 // ---- 增益与限幅 ----
@@ -379,21 +422,27 @@ constexpr float FOLLOW_BREAKAWAY_SPEED_RAD_S = 0.15f;
 //   而电流帧周期 5 ms 时 τ < 周期 → 采样环必然振荡（之前"震动"的根因）。
 //   积分上限必须 ≥ 静摩擦对应的力矩，否则积分顶不过摩擦。
 //   位置环 Kp：12 → 15 用于压缩高速段的"切角"滞后。
-constexpr float FOLLOW_YAW_ANGLE_KP = 15.0f;  // (rad/s)/rad【原始周期：带宽需 ≥3×1.47Hz，10 太小】
-constexpr float FOLLOW_YAW_ANGLE_KI = 3.00f;  // 消除峰谷处的静态误差（纯 P 压不掉）
+constexpr float FOLLOW_YAW_ANGLE_KP =
+  70.0f;  // 85 gave no gain -> back to the 1 ms best  // 70 -> 85: outer loop, no buzz risk  // 55 -> 70: score scales with outer gain (0.083 -> 0.198)  // 35 -> 55: outer loop can go higher without buzz  // 20 -> 35: outer loop only; buzz comes from the inner loop, so this is safe  // 25 -> 20: slight reduction to remove residual wobble  // 10 -> 25: raise position bandwidth (was attenuating to 50%)  // (rad/s)/rad【原始周期：带宽需 ≥3×1.47Hz，10 太小】
+constexpr float FOLLOW_YAW_ANGLE_KI =
+  6.0f;  // revert: 14 was worse  // 6 -> 14: absorb the constant yaw bias within one 1.36 s cycle  // 4 -> 6  // 2 -> 4: helps the lag without adding high-frequency content   // 消除峰谷处的静态误差（纯 P 压不掉）
 constexpr float FOLLOW_YAW_ANGLE_KD =
-  0.0f;  // 与前馈(1.0)冲突：KD 必须为 0 或 1.0，中间值会吃掉驱动
+  1.0f;  // 0.8 mismatched the 1.0 velocity FF and ate 80% of the drive  // 与前馈(1.0)冲突：KD 必须为 0 或 1.0，中间值会吃掉驱动
 constexpr float FOLLOW_YAW_ANGLE_INTEGRAL_LIMIT =
-  0.30f;                                      // rad/s（积分最多贡献 0.3 rad/s 的速度指令）
-constexpr float FOLLOW_YAW_SPEED_KP = 0.13f;  // N·m/(rad/s)【装云台后：0.015→0.100】
-constexpr float FOLLOW_YAW_SPEED_KI = 0.45f;  // N·m/rad（恢复验证值）
-constexpr float FOLLOW_YAW_SPEED_KD = 0.0f;
+  0.30f;  // revert: 0.45 was worse  // 0.30 -> 0.45: allow enough authority for the bias                                      // rad/s（积分最多贡献 0.3 rad/s 的速度指令）
+constexpr float FOLLOW_YAW_SPEED_KP =
+  0.18f;  // 0.22 gave no gain -> back to the 1 ms best  // 0.18 -> 0.22: 1 ms command rate gives headroom  // 0.13 -> 0.18: inner loop can be faster with the 1 ms command rate  // back to the known-stable value (tau 7.7 ms)  // 0.20 -> 0.16: 0.20 was self-oscillating (tau near CAN period)  // 0.13 -> 0.20: faster inner loop, tau = J/Kp = 5 ms > 2 ms CAN  // N·m/(rad/s)【装云台后：0.015→0.100】
+constexpr float FOLLOW_YAW_SPEED_KI =
+  0.35f;  // 0.45 -> 0.35: integral also feeds high-frequency buzz  // N·m/rad（恢复验证值）
+constexpr float FOLLOW_YAW_SPEED_KD = 0.001f;
 constexpr float FOLLOW_YAW_SPEED_INTEGRAL_LIMIT = 0.25f;  // N·m
 constexpr float FOLLOW_YAW_ANGLE_MIN_RAD = 0.0f;
 constexpr float FOLLOW_YAW_ANGLE_MAX_RAD = 0.0f;
-constexpr float FOLLOW_YAW_MAX_SPEED_RAD_S = 10.0f;    // 原始周期峰值 7.15
-constexpr float FOLLOW_YAW_MAX_ACCEL_RAD_S2 = 130.0f;  // 原始周期峰值 106.9
-constexpr float FOLLOW_YAW_MAX_TORQUE_NM = 0.40f;      // ≈0.54 A
+constexpr float FOLLOW_YAW_MAX_SPEED_RAD_S = 10.0f;  // 原始周期峰值 7.15
+constexpr float FOLLOW_YAW_MAX_ACCEL_RAD_S2 =
+  300.0f;  // revert: 450 was worse  // 300 -> 450: the small spikes at each peak need sharper accel  // 130 -> 300: 130 clipped the corner accelerations  // 原始周期峰值 106.9
+constexpr float FOLLOW_YAW_MAX_TORQUE_NM =
+  0.95f;  // 0.80 -> 0.95 (single change: peaks may be torque-clipped)  // back to the 0.237 best  // 0.80 -> 1.20: extra authority to escape the notch  // 0.40 clipped the acceleration      // ≈0.54 A
 constexpr float FOLLOW_YAW_VELOCITY_FF = 1.0f;
 constexpr bool FOLLOW_YAW_CONFIGURED = true;
 
@@ -445,10 +494,10 @@ constexpr unsigned FOLLOW_HOMING_SETTLE_MS = 100U;            // 到位后稳定
 constexpr unsigned FOLLOW_HOMING_BACKOFF_TIMEOUT_MS = 3000U;  // 回退超时（推不动就报错）
 
 // ---- 绘图 ----
-// 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw 2通道，双轴4通道），
+// 0 = 底盘功率（实测 / 期望 / 限幅系数），1 = 跟随曲线（单yaw：目标/实际/分数，双轴按下方配置），
 // 2 = 原始参考，3 = 底盘诊断（FL 目标速度 / 实际速度 / 力矩 / 静止释放标志），
 // 4 = 功率模型标定（Στω / Στ²×100 / Σω²÷20 / 实测功率）
-constexpr unsigned FOLLOW_PLOT_MODE = 0U;
+constexpr unsigned FOLLOW_PLOT_MODE = 1U;
 constexpr bool FOLLOW_YAW_DIAGNOSTICS = false;  // 当前：双轴反馈帧数诊断（查 pitch 电机是否在线）
 // 模式 1 画哪根轴：0 = yaw（目标/实际），1 = pitch（目标/实际）
 constexpr unsigned FOLLOW_PLOT_AXIS = 0U;

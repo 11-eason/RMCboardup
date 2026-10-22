@@ -59,6 +59,7 @@ osThreadId auto_taskHandle;
 osThreadId trajectory_taskHandle;
 osThreadId trajectory_followHandle;
 osThreadId homingHandle;
+osThreadId gradingHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -77,6 +78,8 @@ void StartAutoTask(void const * argument);
 void StartTrajectoryTask(void const * argument);
 void StartTrajectoryFollow(void const * argument);
 void StartTask12(void const * argument);
+void StartTask13(void const * argument);
+extern void pitch_start_task(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -129,6 +132,8 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of chassis_task */
+  osThreadDef(chassis_task, StartChassisTask, osPriorityRealtime, 0, 256);
+  chassis_taskHandle = osThreadCreate(osThread(chassis_task), NULL);
 
   /* definition and creation of rc_task */
   osThreadDef(rc_task, StartRcTask, osPriorityNormal, 0, 256);
@@ -169,6 +174,12 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of homing */
   osThreadDef(homing, StartTask12, osPriorityNormal, 0, 256);
   homingHandle = osThreadCreate(osThread(homing), NULL);
+  osThreadDef(pitch_start, pitch_start_task, osPriorityNormal, 0, 256);
+  osThreadCreate(osThread(pitch_start), NULL);
+
+  /* definition and creation of grading */
+  osThreadDef(grading, StartTask13, osPriorityNormal, 0, 256);
+  gradingHandle = osThreadCreate(osThread(grading), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -206,7 +217,10 @@ void StartDefaultTask(void const * argument)
 void StartChassisTask(void const * argument)
 {
   /* USER CODE BEGIN StartChassisTask */
-  /* Infinite loop */
+  /* Chassis control was removed from this gimbal firmware. A task must not return. */
+  for (;;) {
+    osDelay(1000);
+  }
   /* USER CODE END StartChassisTask */
 }
 
@@ -370,6 +384,21 @@ void StartTask12(void const * argument)
   extern void homing_task(void const * argument);
   homing_task(argument);
   /* USER CODE END StartTask12 */
+}
+
+/* USER CODE BEGIN Header_StartTask13 */
+/**
+* @brief Function implementing the grading thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask13 */
+void StartTask13(void const * argument)
+{
+  /* USER CODE BEGIN StartTask13 */
+  extern void grading_task(void const * argument);
+  grading_task(argument);  // Fixed 1ms loop is implemented in grading.cpp.
+  /* USER CODE END StartTask13 */
 }
 
 /* Private application code --------------------------------------------------*/

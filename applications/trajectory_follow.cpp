@@ -1,5 +1,8 @@
 #include "trajectory_follow.hpp"
 #include "homing.hpp"
+#include "pitch_start.hpp"
+#include "gimbal_can.hpp"
+#include "gimbal_imu.hpp"
 
 #include <cmath>
 
@@ -388,7 +391,7 @@ TransportStatus read_transport()
 
 void transmit_can1(uint32_t now_ms, bool permitted)
 {
-  if (::homing::selected()) return;  // Homing mode owns motor output, including hold/fault.
+  if (::homing::selected() || ::pitch_start::selected()) return;  // Exclusive test owns the motors.
 
   // 电流帧周期 = 执行器采样周期，见文件头注释。这里是"必要不充分"的频率控制：
   // 只有真正发出新帧，电机才会更新力矩。
@@ -465,8 +468,16 @@ void run()
     previous = now;
     const float dt = static_cast<float>(delta) * 0.001f;
 
-    // 起点对齐：解锁瞬间把"当前姿态"映射成轨迹第一点
-    if (motors_live && (recapture || (!initial_pose_captured && startup_capture_allowed))) {
+    // Wait for static IMU calibration before motor motion or zero capture.
+    const bool imu_ready = gimbal_imu::ready();
+    if (!imu_ready && tracking) {
+      set_enabled(false);
+      latch_fault(FAULT_IMU);
+    }
+    // Capture the IMU reference and encoder reference at the same start.
+    if (motors_live && imu_ready &&
+        (recapture || (!initial_pose_captured && startup_capture_allowed)) &&
+        gimbal_imu::capture_reference(initial.yaw, initial.pitch)) {
       yaw_origin = raw_yaw;
       pitch_origin = raw_pitch;
       initial_pose_captured = true;
@@ -505,7 +516,7 @@ void run()
     const bool configuration_ready = configured(control_constants::FOLLOW_YAW) &&
       (control_constants::FOLLOW_SINGLE_YAW || configured(control_constants::FOLLOW_PITCH));
     if (!configuration_ready) latch_fault(FAULT_CONFIG);
-    const bool run_now = enabled && initial_pose_captured && motors_live && configuration_ready &&
+    const bool run_now = enabled && imu_ready && initial_pose_captured && motors_live && configuration_ready &&
                          !rc_stop && timing_ok && !overspeed_latched;
     if (run_now && !tracking) {
       trajectory_start_ms = now;
@@ -535,16 +546,22 @@ void run()
        motors_live && initial_pose_captured}};
     set_feedback(current);
     step(target, current, tracking, now, dt, phase, rc_stop);
+    // Send our own 0x1FE frame: chassis_task.cpp used to do this.
+    transmit_can1(now, !rc_stop);
 
     // 跟踪误差保护：参考与实际偏差过大且持续，就停机锁存，避免越追越飞
     if (tracking) {
-      const Result state = read();
-      yaw_error_ms = std::fabs(state.yaw.angle_error_rad) >
+      // Only copy the two errors here; avoid a full Result on this task stack.
+      taskENTER_CRITICAL();
+      const float yaw_error = latest.yaw.angle_error_rad;
+      const float pitch_error = latest.pitch.angle_error_rad;
+      taskEXIT_CRITICAL();
+      yaw_error_ms = std::fabs(yaw_error) >
                          control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD
                        ? yaw_error_ms + delta
                        : 0U;
       pitch_error_ms = (!control_constants::FOLLOW_SINGLE_YAW &&
-                        std::fabs(state.pitch.angle_error_rad) >
+                        std::fabs(pitch_error) >
                           control_constants::FOLLOW_MAX_TRACKING_ERROR_RAD)
                          ? pitch_error_ms + delta
                          : 0U;
@@ -576,8 +593,10 @@ void run()
 extern "C" void trajectory_follow_task(void const * argument)
 {
   (void)argument;
-  // Preserve the original task. Homing-only debugging keeps tracking waiting,
-  // including after homing completes; do not release outputs automatically.
-  while (::homing::selected()) vTaskDelay(pdMS_TO_TICKS(10));
+  // Neither test is a startup prerequisite. A selected test owns the motors
+  // for this test run; it never automatically hands over to trajectory tracking.
+  while (::homing::selected() || ::pitch_start::selected())
+    vTaskDelay(pdMS_TO_TICKS(10));
+  while (!gimbal_can::start()) vTaskDelay(pdMS_TO_TICKS(100));
   trajectory_follow::run();
 }

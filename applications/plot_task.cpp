@@ -3,7 +3,10 @@
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
 #include "control_constants.hpp"
+#include "grading.hpp"
+#include "gimbal_imu.hpp"
 #include "homing.hpp"
+#include "pitch_start.hpp"
 #include "infrared_status.hpp"
 #include "io/plotter/plotter.hpp"
 #include "task.h"
@@ -12,7 +15,7 @@
 #include "usart.h"
 
 // USART1 / physical 4-pin UART2: AA BB + byte length + little-endian floats.
-// Power mode (default): measured W, predicted W after torque limiting; 2 floats.
+// Yaw test: target angle (rad), actual IMU angle (rad), score (0..1); 3 floats.
 // Infrared mode, when explicitly enabled: distance and reception diagnostics.
 // Other plot modes below are inactive while INFRARED_PLOT_TEST is true.
 
@@ -25,8 +28,26 @@ extern "C" void plot_task()
   uint32_t last_wake = osKernelSysTick();
   for (;;) {
     osDelayUntil(&last_wake, 20);
-    if (homing::selected()) {
-      const auto home = homing::snapshot();
+    if (homing::selected() || pitch_start::selected()) {
+      // 两个模块的 Status 类型不同，用共同字段手工取值。
+      const bool use_home = homing::selected();
+      const auto hs = homing::snapshot();
+      const auto ps = pitch_start::snapshot();
+      const float picked_stage = use_home ? static_cast<float>(hs.stage) : static_cast<float>(ps.stage);
+      const float picked_pitch = use_home ? hs.pitch_angle_rad : ps.pitch_angle_rad;
+      const float picked_target =
+        use_home ? hs.pitch_return_target_relative_rad : ps.pitch_return_target_relative_rad;
+      const float picked_rel =
+        use_home ? hs.pitch_return_relative_rad : ps.pitch_return_relative_rad;
+      const float picked_fault = use_home ? static_cast<float>(hs.fault) : static_cast<float>(ps.fault);
+      const float picked_homed = (use_home ? hs.homed : ps.homed) ? 1.0f : 0.0f;
+      const float picked_pitch_tq = use_home ? hs.pitch_torque_nm : ps.pitch_torque_nm;
+      const float picked_m_tq = use_home ? hs.m2006_torque_nm : ps.m2006_torque_nm;
+      const float picked_stall = static_cast<float>(use_home ? hs.stall_elapsed_ms : ps.stall_elapsed_ms);
+      const float picked_mrel = use_home ? hs.m2006_relative_rad : ps.m2006_relative_rad;
+      const float picked_mlock = (use_home ? hs.m2006_locked : ps.m2006_locked) ? 1.0f : 0.0f;
+      const float picked_mfb_tq =
+        use_home ? hs.m2006_feedback_torque_nm : ps.m2006_feedback_torque_nm;
       // 1 phase, 2 GM6020 absolute rad, 3/4 GM6020 return target/actual rad,
       // 5 fault, 6 done; optional 7/8 command Nm and 9/10 feedback Nm (GM6020/M2006).
       if (control_constants::HOME_PLOT_TORQUES) {
@@ -35,22 +56,46 @@ extern "C" void plot_task()
         //          9 stall_elapsed_ms（顶挡块计时，0→300 说明判定成功）
         //          10 M2006反馈力矩
         plotter.plot(
-          static_cast<float>(home.stage), home.pitch_angle_rad,
-          home.pitch_return_target_relative_rad, home.pitch_return_relative_rad,
-          static_cast<float>(home.fault), home.homed ? 1.0f : 0.0f, home.pitch_torque_nm,
-          home.m2006_torque_nm, static_cast<float>(home.stall_elapsed_ms), home.m2006_relative_rad,
-          home.m2006_locked ? 1.0f : 0.0f);  // ch10 angle, ch11 locked
+          picked_stage, picked_pitch,
+          picked_target, picked_rel,
+          picked_fault, picked_homed, picked_pitch_tq,
+          picked_m_tq, picked_stall, picked_mrel,
+          picked_mlock,
+        picked_mfb_tq);  // ch10 angle, ch11 locked, ch12 M2006 feedback torque
       }
       else {
         // 8 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
         //         7 stall_elapsed_ms（顶挡块计时，0→300 说明判定成功）
         //         8 6020 指令力矩（顶住时应达到 0.40）
         plotter.plot(
-          static_cast<float>(home.stage), home.pitch_angle_rad,
-          home.pitch_return_target_relative_rad, home.pitch_return_relative_rad,
-          static_cast<float>(home.fault), home.homed ? 1.0f : 0.0f,
-          static_cast<float>(home.stall_elapsed_ms), home.pitch_torque_nm);
+          picked_stage, picked_pitch,
+          picked_target, picked_rel,
+          picked_fault, picked_homed,
+          picked_stall, picked_pitch_tq);
       }
+    }
+    else if (control_constants::IMU_STARTUP_DIAGNOSTICS) {
+      const auto score = grading::read();
+      const auto imu = gimbal_imu::read();
+      const auto bus = trajectory_follow::read_transport();
+      static uint32_t previous_yaw_frames = 0;
+      float progress = static_cast<float>(imu.calibration_elapsed_ms) /
+                       control_constants::IMU_CALIBRATION_MS;
+      const float sample_progress = static_cast<float>(imu.calibration_samples) /
+                                    control_constants::IMU_CALIBRATION_MIN_SAMPLES;
+      if (sample_progress < progress) progress = sample_progress;
+      if (progress > 1.0f) progress = 1.0f;
+      if (imu.ready) progress = 1.0f;
+      // First three channels are unchanged. Remaining channels diagnose startup.
+      plotter.plot(
+        score.target_yaw_rad, score.actual_yaw_rad, score.yaw_ratio,
+        static_cast<float>(imu.phase), static_cast<float>(imu.fault),
+        static_cast<float>(imu.init_error), progress,
+        static_cast<float>(bus.yaw_frames - previous_yaw_frames),
+        static_cast<float>(score.follow_fault), imu.acceleration_norm_mps2,
+        imu.max_raw_gyro_rad_s * 57.2957795f,
+        static_cast<float>(imu.calibration_restart_reason));
+      previous_yaw_frames = bus.yaw_frames;
     }
     else if (control_constants::INFRARED_PLOT_TEST) {
       static uint32_t previous_bytes = 0, previous_frames = 0;
@@ -103,8 +148,10 @@ extern "C" void plot_task()
           last_tx_frames = bus.tx_frames;
         }
         else {
-          // Both channels use the same trajectory clock and captured zero.
-          plotter.plot(state.yaw.target_angle_rad, state.yaw.actual_angle_rad);
+          // Same aligned IMU values as scoring; NaN while not ready/aligned.
+          const auto score = grading::read();
+          plotter.plot(
+            score.target_yaw_rad, score.actual_yaw_rad, score.yaw_ratio);
         }
       }
       else {
@@ -124,18 +171,20 @@ extern "C" void plot_task()
           last_pitch_frames = bus.pitch_frames;
         }
         else if (control_constants::FOLLOW_PLOT_AXIS == 1U) {
-          plotter.plot(state.pitch.target_angle_rad, state.pitch.actual_angle_rad);
+          const auto score = grading::read();
+          plotter.plot(score.target_pitch_rad, score.actual_pitch_rad);
         }
         else {
-          plotter.plot(state.yaw.target_angle_rad, state.yaw.actual_angle_rad);
+          const auto score = grading::read();
+          plotter.plot(score.target_yaw_rad, score.actual_yaw_rad);
         }
       }
     }
     else {
-      const auto state = trajectory_follow::read();
+      const auto score = grading::read();
       plotter.plot(
-        state.yaw.target_angle_rad, state.yaw.actual_angle_rad, state.pitch.target_angle_rad,
-        state.pitch.actual_angle_rad);
+        score.target_yaw_rad, score.actual_yaw_rad, score.target_pitch_rad,
+        score.actual_pitch_rad);
     }
   }
 }

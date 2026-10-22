@@ -1,5 +1,5 @@
 #include "homing.hpp"
-#include "trajectory_follow.hpp"
+#include "gimbal_can.hpp"
 #include <cmath>
 #include "FreeRTOS.h"
 #include "task.h"
@@ -8,7 +8,6 @@
 
 extern "C" void buzzer_signal_homing_done();
 
-static void homing_can_start();
 
 namespace homing {
 namespace {
@@ -22,7 +21,7 @@ bool finished = false;
 uint32_t pitch_stamp=0, m_stamp=0, pitch_rx=0, m_rx=0, tx_errors=0;
 float pitch_request=0.0f, m_request=0.0f;
 uint32_t command_stamp=0, last_tx=0;
-bool sent_once=false, start_requested=c::HOME_AUTO_START, stop_requested=false;
+bool sent_once=false, start_requested=c::HOMING_ENABLED, stop_requested=false;
 float clamp(float v,float lo,float hi) { return v<lo ? lo : (v>hi ? hi : v); }
 struct PI {
   float integral=0.0f;
@@ -48,6 +47,11 @@ struct Controller {
   uint32_t m2006_home_since=0;
   uint32_t m2006_settle_since=0;
   bool m2006_pullback=false;  // reached pullback angle -> reverse drive
+  bool pullback_wait=false;   // reached the bottom -> hold 5 s before reversing
+  bool phase_a_hold=false;    // phase A done -> lock the M2006 for 5 s
+  uint32_t phase_a_hold_since=0;
+  float phase_a_hold_angle=0.0f;
+  uint32_t pullback_wait_since=0;
   bool m2006_hold_locked=false;   // reached ch10 target -> hold engaged
   uint32_t m2006_hold_since=0;
   float m2006_hold_angle=0.0f;
@@ -171,6 +175,11 @@ struct Controller {
           pitch_locked=true;
           pitch_lock_angle=f.pa;
           m2006_phase_start=f.ma;
+          // Phase A finished: lock the M2006 here for 5 s before phase B.
+          // DISABLED for isolation test (set to true to re-enable).
+          phase_a_hold=false;
+          phase_a_hold_since=now;
+          phase_a_hold_angle=f.ma;
         }
       }
       else {
@@ -193,9 +202,25 @@ struct Controller {
         // Trigger: M2006 relative shaft angle (channel 10) reaches 2.5 rad.
         // One-shot latch; small variation afterwards is allowed.
         if (!m2006_hold_locked) {
-          // Reached the pullback angle: reverse with a larger torque and pull back.
-          if (!m2006_pullback && out.m2006_relative_rad>=c::HOME_M2006_PULLBACK_RAD)
-            m2006_pullback=true;
+          // 5 s lock at the end of phase A (position hold on the M2006).
+          if (phase_a_hold) {
+            const float e_a=phase_a_hold_angle-f.ma;
+            out.m2006_torque_nm=clamp(3.0f*e_a-0.30f*f.ms,
+              -c::HOME_M2006_BREAKAWAY_TORQUE_NM,c::HOME_M2006_BREAKAWAY_TORQUE_NM);
+            if (now-phase_a_hold_since>=5000U) phase_a_hold=false;
+            return;
+          }
+          // Reached the bottom: stop here and wait 5 s before reversing.
+          // The 6020 keeps its phase-B lock during the wait.
+          if (!m2006_pullback && out.m2006_relative_rad>=c::HOME_M2006_PULLBACK_RAD) {
+            if (!pullback_wait) {
+              pullback_wait=true;
+              pullback_wait_since=now;
+            }
+            else if (now-pullback_wait_since>=5000U) {
+              m2006_pullback=true;
+            }
+          }
           if (m2006_pullback) {
             if (out.m2006_relative_rad<=c::HOME_M2006_PULLBACK_STOP_RAD) {
               // Pulled back far enough -> engage the hold (channel 11 goes to 1).
@@ -208,6 +233,10 @@ struct Controller {
               out.m2006_torque_nm=-dir*c::HOME_M2006_DRIVE_DIR*c::HOME_M2006_PULLBACK_TORQUE_NM-
                 c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
             }
+          }
+          else if (pullback_wait) {
+            // 5 s dwell at the bottom: no drive, damping only.
+            out.m2006_torque_nm=-c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
           }
           else {
             out.m2006_torque_nm=dir*c::HOME_M2006_DRIVE_DIR*tq-
@@ -380,8 +409,8 @@ bool submit(uint32_t id,uint8_t * data) {
   return true;
 }
 } // namespace
-// Selected until the WHOLE homing sequence finishes, then hands over to the follow task.
-bool selected() {return c::HOME_MODE;}  // stays selected: final hold keeps running
+// Standalone selection; completion never schedules another motor program.
+bool selected() {return c::HOMING_ENABLED;}
 void start() {taskENTER_CRITICAL();start_requested=true;stop_requested=false;taskEXIT_CRITICAL();}
 void cancel() {taskENTER_CRITICAL();finished=false;stop_requested=true;start_requested=false;
   pitch_request=m_request=0.0f;taskEXIT_CRITICAL();}
@@ -426,69 +455,30 @@ void run() {
     if (stop) ctrl=Controller{};
     else if (go) ctrl.begin(now);
     ctrl.step(f,now,elapsed*0.001f);
-    const bool handoff=ctrl.out.homed && ctrl.m2006_home_done;
+    const bool completed=ctrl.out.homed && ctrl.m2006_home_done;
     taskENTER_CRITICAL();
     latest=ctrl.out;pitch_request=ctrl.out.pitch_torque_nm;m_request=ctrl.out.m2006_torque_nm;
     command_stamp=now;
-    // Hand off only when BOTH stages finish. Always restore the interrupt mask
-    // before notifying another task or returning from this task controller.
-    if (handoff && !finished) {
+    // Notify completion only; remain in this program and preserve its stop/hold logic.
+    if (completed && !finished) {
       finished=true;
       // Signal ONCE: doing this every cycle re-triggered the buzzer forever.
       buzzer_signal_homing_done();
     }
     taskEXIT_CRITICAL();
 
-    // Transmit from here: chassis_task.cpp used to call both transmits each 1 ms.
+    // Only this selected program may transmit its motor commands.
     transmit_can1(now);
-    trajectory_follow::transmit_can1(now, true);
     if (elapsed>c::HOME_MAX_STEP_MS) wake=now;
   }
 }
 } // namespace homing
 extern "C" void homing_task(void const * argument) {
   (void)argument;
-  // Enable the CAN1 RX interrupt here: can1.start() used to do it from the chassis task.
-  homing_can_start();
-  // The user's independent homing task owns this controller only.
-  if (homing::selected()) homing::run();
-  for (;;) {vTaskDelay(pdMS_TO_TICKS(100));}
-}
-
-// CAN1 receive pump. It used to live in chassis_task.cpp; with the chassis code moved
-// to another project this project must own it or the gimbal gets no feedback at all.
-static void homing_can_start()
-{
-  // Filter + Start + RX notification all used to be done by can1.config()/can1.start()
-  // inside the (now removed) chassis task. Accept every standard frame.
-  CAN_FilterTypeDef filter = {};
-  filter.FilterBank = 0;
-  filter.FilterMode = CAN_FILTERMODE_IDMASK;
-  filter.FilterScale = CAN_FILTERSCALE_32BIT;
-  filter.FilterIdHigh = 0;
-  filter.FilterIdLow = 0;
-  filter.FilterMaskIdHigh = 0;
-  filter.FilterMaskIdLow = 0;
-  filter.FilterFIFOAssignment = CAN_RX_FIFO0;
-  filter.FilterActivation = ENABLE;
-  filter.SlaveStartFilterBank = 14;
-  HAL_CAN_ConfigFilter(&hcan1, &filter);
-  HAL_CAN_Start(&hcan1);
-  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
-}
-
-extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
-{
-  if (hcan != &hcan1) return;
-  CAN_RxHeaderTypeDef header = {};
-  uint8_t data[8] = {};
-  const uint32_t now = xTaskGetTickCount();
-  while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0U) {
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK) break;
-    // Frames the homing does not own must still reach the follow task, otherwise the
-    // yaw/pitch feedback never arrives and the yaw cannot be driven at all.
-    if (!homing::receive_can1(header, data, now))
-      trajectory_follow::receive_can1(header, data, now);
+  if (homing::selected()) {
+    while (!gimbal_can::start()) vTaskDelay(pdMS_TO_TICKS(100));
+    homing::run();
   }
+  for (;;) {vTaskDelay(pdMS_TO_TICKS(100));}
 }
 
