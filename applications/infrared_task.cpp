@@ -14,6 +14,8 @@ uint32_t last_byte_ms = 0, last_frame_ms = 0;
 uint32_t byte_count = 0, frame_count = 0, checksum_errors = 0, uart_errors = 0;
 float distance_cm = 0.0f;
 bool have_frame = false;
+bool timer_started = false;
+uint32_t timer_start_ms = 0;
 uint32_t current_baud = control_constants::INFRARED_UART_BAUD;
 uint8_t last_payload_length = 0;
 uint16_t last_raw_distance = 0;
@@ -87,6 +89,7 @@ Status snapshot()
 extern "C" void infrared_task()
 {
   g_data.infrared_valid = 0;
+  g_data.infrared_timer_ms = 0;
   // USART6 is dedicated to the sensor; USART1 plot baud remains unchanged.
   HAL_UART_AbortReceive(&huart6);
   huart6.Init.BaudRate = control_constants::INFRARED_UART_BAUD;
@@ -116,9 +119,18 @@ extern "C" void infrared_task()
       probe_start_ms = osKernelSysTick();
     }
     taskENTER_CRITICAL();
-    if (!have_frame || osKernelSysTick() - last_frame_ms >=
+    const uint32_t now = osKernelSysTick();
+    if (!have_frame || now - last_frame_ms >=
                        control_constants::INFRARED_VALID_TIMEOUT_MS)
       g_data.infrared_valid = 0;
+    const bool le30 = (g_data.infrared_valid != 0U) && (g_data.distance_cm <= 30U);
+    if (!timer_started && le30) {
+      timer_started = true;
+      timer_start_ms = now;
+    }
+    if (timer_started) {
+      g_data.infrared_timer_ms = now - timer_start_ms;
+    }
     // Existing HAL error callback belongs to rc_task; recover USART6 here.
     if (huart6.ErrorCode != HAL_UART_ERROR_NONE) {
       ++uart_errors;

@@ -16,6 +16,7 @@ struct SharedData
   uint16_t distance_cm;
   uint8_t infrared_valid;
   uint32_t infrared_last_rx_ms;
+  uint32_t infrared_timer_ms;  // starts on first IR<=30, runs until reset/power-off
 
   // 自主任务
   uint8_t auto_state;    // 见 AutoState 枚举
