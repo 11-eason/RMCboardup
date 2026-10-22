@@ -1,9 +1,27 @@
-.DS_Store
-Thumbs.db
+# 构建产物
 build/
-.vscode/*
-!.vscode/settings.json
-!.vscode/c_cpp_properties.json
-!.vscode/launch.json
-!.vscode/tasks.json
-*.ioc.bak
+cmake-build-*/
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.obj
+*.d
+*.su
+*.rsp
+
+# 编辑器/系统
+.vscode/.browse*
+.vs/
+.idea/
+.cache/
+*.swp
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.log
+*.tmp
