@@ -8,6 +8,7 @@
 #include "homing.hpp"
 #include "pitch_start.hpp"
 #include "infrared_status.hpp"
+#include "shared_data.hpp"
 #include "io/plotter/plotter.hpp"
 #include "task.h"
 #include "trajectory_follow.hpp"
@@ -48,30 +49,34 @@ extern "C" void plot_task()
       const float picked_mlock = (use_home ? hs.m2006_locked : ps.m2006_locked) ? 1.0f : 0.0f;
       const float picked_mfb_tq =
         use_home ? hs.m2006_feedback_torque_nm : ps.m2006_feedback_torque_nm;
+      const float picked_ir_timer = static_cast<float>(g_data.infrared_timer_ms);
       // 1 phase, 2 GM6020 absolute rad, 3/4 GM6020 return target/actual rad,
       // 5 fault, 6 done; optional 7/8 command Nm and 9/10 feedback Nm (GM6020/M2006).
       if (control_constants::HOME_PLOT_TORQUES) {
-        // 10 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
+        // 13 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
         //          7 6020指令力矩 8 M2006指令力矩
         //          9 stall_elapsed_ms（顶挡块计时，0→300 说明判定成功）
-        //          10 M2006反馈力矩
+        //          10 M2006相对角 11 M2006锁定 12 M2006反馈力矩
+        //          13 IR<=30 单向计时器（ms）
         plotter.plot(
           picked_stage, picked_pitch,
           picked_target, picked_rel,
           picked_fault, picked_homed, picked_pitch_tq,
           picked_m_tq, picked_stall, picked_mrel,
-          picked_mlock,
-        picked_mfb_tq);  // ch10 angle, ch11 locked, ch12 M2006 feedback torque
+          picked_mlock, picked_mfb_tq,
+          picked_ir_timer);
       }
       else {
-        // 8 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
+        // 9 通道：1 stage 2 绝对角 3/4 回退目标/实际 5 fault 6 homed
         //         7 stall_elapsed_ms（顶挡块计时，0→300 说明判定成功）
         //         8 6020 指令力矩（顶住时应达到 0.40）
+        //         9 IR<=30 单向计时器（ms）
         plotter.plot(
           picked_stage, picked_pitch,
           picked_target, picked_rel,
           picked_fault, picked_homed,
-          picked_stall, picked_pitch_tq);
+          picked_stall, picked_pitch_tq,
+          picked_ir_timer);
       }
     }
     else if (control_constants::IMU_STARTUP_DIAGNOSTICS) {
