@@ -55,7 +55,6 @@ osThreadId led_taskHandle;
 osThreadId buzzer_taskHandle;
 osThreadId plot_taskHandle;
 osThreadId fold_taskHandle;
-osThreadId auto_taskHandle;
 osThreadId trajectory_taskHandle;
 osThreadId trajectory_followHandle;
 osThreadId homingHandle;
@@ -74,12 +73,10 @@ void StartLedTask(void const * argument);
 void StartBuzzerTask(void const * argument);
 void StartPlotTask(void const * argument);
 void StartFoldTAsk(void const * argument);
-void StartAutoTask(void const * argument);
 void StartTrajectoryTask(void const * argument);
 void StartTrajectoryFollow(void const * argument);
 void StartTask12(void const * argument);
 void StartTask13(void const * argument);
-extern void pitch_start_task(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -159,10 +156,6 @@ void MX_FREERTOS_Init(void) {
   osThreadDef(fold_task, StartFoldTAsk, osPriorityNormal, 0, 256);
   fold_taskHandle = osThreadCreate(osThread(fold_task), NULL);
 
-  /* definition and creation of auto_task */
-  osThreadDef(auto_task, StartAutoTask, osPriorityNormal, 0, 256);
-  auto_taskHandle = osThreadCreate(osThread(auto_task), NULL);
-
   /* definition and creation of trajectory_task */
   osThreadDef(trajectory_task, StartTrajectoryTask, osPriorityNormal, 0, 256);
   trajectory_taskHandle = osThreadCreate(osThread(trajectory_task), NULL);
@@ -174,8 +167,6 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of homing */
   osThreadDef(homing, StartTask12, osPriorityNormal, 0, 256);
   homingHandle = osThreadCreate(osThread(homing), NULL);
-  osThreadDef(pitch_start, pitch_start_task, osPriorityNormal, 0, 256);
-  osThreadCreate(osThread(pitch_start), NULL);
 
   /* definition and creation of grading */
   osThreadDef(grading, StartTask13, osPriorityNormal, 0, 256);
@@ -318,22 +309,6 @@ void StartFoldTAsk(void const * argument)
   extern void fold_task(void);
   fold_task();
   /* USER CODE END StartFoldTAsk */
-}
-
-/* USER CODE BEGIN Header_StartAutoTask */
-/**
-* @brief Function implementing the auto_task thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartAutoTask */
-void StartAutoTask(void const * argument)
-{
-  /* USER CODE BEGIN StartAutoTask */
-  /* Infinite loop */
-  extern void auto_task(void);
-  auto_task();
-  /* USER CODE END StartAutoTask */
 }
 
 /* USER CODE BEGIN Header_StartTrajectoryTask */
