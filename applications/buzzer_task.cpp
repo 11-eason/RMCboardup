@@ -14,7 +14,16 @@ void beep(int times)
     osDelay(100);
   }
 }
+volatile bool g_homing_done_pending = false;
 }  // namespace
+
+// Called from the homing task when the whole sequence (6020 zero + M2006 final
+// rotation) is finished. Only sets a flag; the beep is produced here so the
+// homing loop never blocks.
+extern "C" void buzzer_signal_homing_done()
+{
+  g_homing_done_pending = true;
+}
 
 extern "C" void buzzer_task()
 {
@@ -47,6 +56,13 @@ extern "C" void buzzer_task()
   // 都没有 → 不加提示音（和原来行为一致）
 
   for (;;) {
-    osDelay(1000);
+    if (g_homing_done_pending) {
+      g_homing_done_pending = false;
+      osDelay(500);          // 0.5 s after the M2006 arrives
+      buzzer.start();
+      osDelay(500);          // one 0.5 s beep
+      buzzer.stop();
+    }
+    osDelay(20);
   }
 }

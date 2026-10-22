@@ -1,9 +1,14 @@
 #include "homing.hpp"
+#include "trajectory_follow.hpp"
 #include <cmath>
 #include "FreeRTOS.h"
 #include "task.h"
 #include "control_constants.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
+
+extern "C" void buzzer_signal_homing_done();
+
+static void homing_can_start();
 
 namespace homing {
 namespace {
@@ -12,6 +17,8 @@ static_assert(configTICK_RATE_HZ == 1000, "Homing requires 1ms ticks");
 sp::RM_Motor pitch(c::HOME_PITCH_ID, sp::RM_Motors::GM6020, c::HOME_PITCH_RATIO);
 sp::RM_Motor m2006(c::HOME_M2006_ID, sp::RM_Motors::M2006, c::HOME_M2006_RATIO);
 Status latest = {};
+// Set only when BOTH stages are done (6020 zero AND M2006 final rotation).
+bool finished = false;
 uint32_t pitch_stamp=0, m_stamp=0, pitch_rx=0, m_rx=0, tx_errors=0;
 float pitch_request=0.0f, m_request=0.0f;
 uint32_t command_stamp=0, last_tx=0;
@@ -39,6 +46,15 @@ struct Controller {
   float m2006_home_target=0.0f;      // M2006 最终转动目标
   bool m2006_home_armed=false, m2006_home_done=false;
   uint32_t m2006_home_since=0;
+  uint32_t m2006_settle_since=0;
+  bool m2006_pullback=false;  // reached pullback angle -> reverse drive
+  bool m2006_hold_locked=false;   // reached ch10 target -> hold engaged
+  uint32_t m2006_hold_since=0;
+  float m2006_hold_angle=0.0f;
+  bool pitch_locked=false;      // 6020 locked after the 15 deg M2006 backoff
+  float pitch_lock_angle=0.0f;
+  float phaseb_torque=0.0f;   // ramped phase-B lock torque (avoids the handoff jerk)
+  float m2006_phase_start=0.0f;  // arrival -> 0.5 s hold -> permanent lock
   bool stall_active=false, settle_active=false, seek_motion_seen=false;
   float pitch_start=0.0f, stall_angle=0.0f, m_origin=0.0f, pitch_return_origin=0.0f;
   float pitch_speed_cmd=0.0f, m_speed_cmd=0.0f;
@@ -88,7 +104,7 @@ struct Controller {
     constexpr uint32_t kOverspeedDebounceMs=50U;
     if (std::fabs(f.ps)>c::HOME_OVERSPEED_RAD_S) { if (!pitch_os_since) pitch_os_since=now; }
     else pitch_os_since=0;
-    if (std::fabs(f.ms)>c::HOME_OVERSPEED_RAD_S) { if (!m_os_since) m_os_since=now; }
+    if (std::fabs(f.ms)>c::HOME_M2006_OVERSPEED_RAD_S) { if (!m_os_since) m_os_since=now; }
     else m_os_since=0;
     if (pitch_os_since && now-pitch_os_since>=kOverspeedDebounceMs) {
       fault(Fault::PitchOverspeed);return;
@@ -135,6 +151,96 @@ struct Controller {
       }
       return; // M2006 remains zero for this entire phase.
     }
+    if (out.stage==Stage::MovePitch) {
+      // New scheme: the M2006 does all the motion.
+      //   Phase A: 6020 released, M2006 drives the axis back 15 deg.
+      //   Phase B: 6020 locks at that angle, M2006 continues another 45 deg.
+      const float dir=-c::HOME_PITCH_DIRECTION;
+      // Two-level drive: breakaway torque while (nearly) stationary, small torque to cruise.
+      // A single constant torque either cannot start (0.15) or runs away (0.80).
+      const float tq=(std::fabs(f.ms)<c::HOME_M2006_BREAKAWAY_SPEED_RAD_S) ?
+        c::HOME_M2006_BREAKAWAY_TORQUE_NM : c::HOME_M2006_CRUISE_TORQUE_NM;
+      // Damping must oppose the actual motion, whatever the drive direction is.
+      out.m2006_torque_nm=dir*c::HOME_M2006_DRIVE_DIR*tq-c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
+      if (!pitch_locked) {
+        out.pitch_torque_nm=0.0f;                       // 6020 free, back-driven
+        const float travel=dir*(f.pa-pitch_return_origin);
+        out.pitch_return_relative_rad=travel;
+        out.pitch_return_target_relative_rad=c::HOME_PITCH_RETURN_MOVE_RAD;
+        if (travel>=c::HOME_PITCH_RETURN_MOVE_RAD) {
+          pitch_locked=true;
+          pitch_lock_angle=f.pa;
+          m2006_phase_start=f.ma;
+        }
+      }
+      else {
+        // 6020 stiff hold at the recorded angle
+        const float err_lock=pitch_lock_angle-f.pa;
+        // Weak lock here so the M2006 translation can still move the axis.
+        const float e_b=(std::fabs(err_lock)>c::HOME_PITCH_HOLD_DEADBAND_RAD) ? err_lock : 0.0f;
+        const float want=clamp(c::HOME_PITCH_PHASEB_STIFF_NM_PER_RAD*e_b
+          -c::HOME_PITCH_PHASEB_DAMP_NM_PER_RAD_S*f.ps,
+          -c::HOME_PITCH_PHASEB_MAX_TORQUE_NM,c::HOME_PITCH_PHASEB_MAX_TORQUE_NM);
+        // Ramp the lock torque in (<= 3 Nm/s) so the A->B handoff has no step.
+        const float max_step=3.0f*dt;
+        phaseb_torque+=clamp(want-phaseb_torque,-max_step,max_step);
+        // The 6020 MUST keep its full weak lock: with it released the pitch falls and
+        // the M2006 can no longer translate the pivot at all. The resulting rock during
+        // the pull-back is a mechanical coupling limit, not a gain problem.
+        out.pitch_torque_nm=phaseb_torque;
+        // Use the PITCH angle travel, not the M2006 shaft angle: the M2006 drives a
+        // lead screw, so its shaft angle is not comparable to the arm angle.
+        // Trigger: M2006 relative shaft angle (channel 10) reaches 2.5 rad.
+        // One-shot latch; small variation afterwards is allowed.
+        if (!m2006_hold_locked) {
+          // Reached the pullback angle: reverse with a larger torque and pull back.
+          if (!m2006_pullback && out.m2006_relative_rad>=c::HOME_M2006_PULLBACK_RAD)
+            m2006_pullback=true;
+          if (m2006_pullback) {
+            if (out.m2006_relative_rad<=c::HOME_M2006_PULLBACK_STOP_RAD) {
+              // Pulled back far enough -> engage the hold (channel 11 goes to 1).
+              m2006_hold_locked=true;
+              m2006_hold_since=now;
+              m2006_hold_angle=f.ma;
+              out.m2006_torque_nm=0.0f;
+            }
+            else {
+              out.m2006_torque_nm=-dir*c::HOME_M2006_DRIVE_DIR*c::HOME_M2006_PULLBACK_TORQUE_NM-
+                c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
+            }
+          }
+          else {
+            out.m2006_torque_nm=dir*c::HOME_M2006_DRIVE_DIR*tq-
+              c::HOME_M2006_DAMPING_NM_PER_RAD_S*f.ms;
+          }
+          // Phase B trigger uses the ARM angle: phase A travel + this phase's travel.
+          const float arm_travel=dir*(f.pa-pitch_return_origin);
+          if (arm_travel>=c::HOME_PITCH_RETURN_MOVE_RAD+c::HOME_M2006_CONTINUE_RAD) {
+            m2006_hold_locked=true;
+            m2006_hold_since=now;
+            m2006_hold_angle=f.ma;
+          }
+        }
+        else {
+          // Hold with a small deadband so a little drift is tolerated.
+          const float err_hold=m2006_hold_angle-f.ma;
+          out.m2006_torque_nm=(std::fabs(err_hold)>0.05f) ?
+            clamp(c::HOME_M2006_POSITION_KP*err_hold,
+              -c::HOME_M2006_MAX_TORQUE_NM,c::HOME_M2006_MAX_TORQUE_NM) : 0.0f;
+          if (now-m2006_hold_since>=5000U) {
+            out.stage=Stage::Done;out.homed=true;
+            out.pitch_zero_rad=f.pa;out.m2006_zero_rad=f.ma;
+            m2006_home_done=true;
+            pitch_speed_cmd=0.0f;m_pi={};m_speed_cmd=0.0f;
+          }
+        }
+        out.m2006_locked=m2006_hold_locked;
+      }
+      if (now-entered>=c::HOME_PITCH_RETURN_TIMEOUT_MS) {
+        fault(Fault::MoveTimeout);
+      }
+      return;
+    }
     if (out.stage==Stage::MovePitch || out.stage==Stage::Done) {
       const float delta=f.pa-pitch_return_origin;
       const float target=-c::HOME_PITCH_DIRECTION*c::HOME_PITCH_RETURN_MOVE_RAD;
@@ -180,20 +286,34 @@ struct Controller {
       // Deadband: inside 4 deg, command zero speed (pure damping). No position correction,
       // so the loop cannot hunt back and forth around the recorded zero.
       const float err_p=position_goal-f.pa;
-      const float wanted=(holding && std::fabs(err_p)<c::HOME_PITCH_HOLD_DEADBAND_RAD) ?
-        0.0f : clamp(position_kp*err_p,-speed_limit,speed_limit);
       const float dv=c::HOME_TARGET_ACCEL_RAD_S2*dt;
-      pitch_speed_cmd+=clamp(wanted-pitch_speed_cmd,-dv,dv);
-      out.pitch_torque_nm=pitch_pi.step(pitch_speed_cmd,f.ps,
-        holding ? c::HOME_PITCH_HOLD_SPEED_KP : c::HOME_PITCH_RETURN_SPEED_KP,
-        holding ? c::HOME_PITCH_HOLD_SPEED_KI : c::HOME_PITCH_RETURN_SPEED_KI,
-        holding ? c::HOME_PITCH_HOLD_MAX_TORQUE_NM : c::HOME_PITCH_RETURN_MAX_TORQUE_NM,dt);
+      if (holding) {
+        // Single PD controller only. Running the position->speed loop AND the spring
+        // together made the two fight each other and vibrate.
+        pitch_pi={};
+        pitch_speed_cmd=0.0f;
+        out.pitch_torque_nm=0.0f;
+      }
+      else {
+        // Backoff: plain constant torque away from the stop. No speed loop -> no vibration.
+        out.pitch_torque_nm=-c::HOME_PITCH_DIRECTION*c::HOME_PITCH_RETURN_TORQUE_NM;
+      }
+      // Locked pose: add a direct position->torque spring so the axis cannot be
+      // pushed away. The speed loop alone is soft (velocity-type hold).
+      if (holding) {
+        const float stiff=0.0f;  // both axes disabled after homing
+        out.pitch_torque_nm=clamp(out.pitch_torque_nm+stiff,
+          -c::HOME_PITCH_HOLD_MAX_TORQUE_NM,c::HOME_PITCH_HOLD_MAX_TORQUE_NM);
+      }
 
       if (!holding) {
         // Settle test is POSITION ONLY. During the return the M2006 follows the 6020 and
         // the linkage couples them, so both speed readings keep jittering; requiring a
         // low speed never becomes true and the return would always time out.
-        const bool settled=std::fabs(target-delta)<=c::HOME_PITCH_RETURN_TOLERANCE_RAD;
+        // Angle-triggered: once the axis has travelled the full backoff angle, lock.
+        // Direction-aware so overshoot cannot re-arm the trigger.
+        const float travel=-c::HOME_PITCH_DIRECTION*delta;
+        const bool settled=travel>=c::HOME_PITCH_RETURN_MOVE_RAD;
         // First time the position error enters the band -> latch Done immediately.
         // No dwell time, so the controller does not keep making small corrections.
         if (settled) {
@@ -229,32 +349,26 @@ struct Controller {
           return;
         }
         const float err_home=m2006_home_target-f.ma;
-        const float wanted_home=clamp(c::HOME_M2006_POSITION_KP*err_home,
-          -c::HOME_M2006_MAX_SPEED_RAD_S,c::HOME_M2006_MAX_SPEED_RAD_S);
-        m_speed_cmd+=clamp(wanted_home-m_speed_cmd,-dv,dv);
-        const float pi_home=m_pi.step(m_speed_cmd,f.ms,c::HOME_M2006_SPEED_KP,
-          c::HOME_M2006_SPEED_KI,c::HOME_M2006_MAX_TORQUE_NM,dt);
-        // Breakaway feedforward: position->speed->torque starts at only
-        // 0.10 x 0.35 = 0.035 Nm, which cannot overcome the M2006 static friction.
-        // Push directly in the direction of the remaining error until close to target.
-        const float ff_home=(std::fabs(err_home)>(2.0f*c::HOME_M2006_FINAL_TOL_RAD)) ?
-          ((err_home>0.0f ? 1.0f : -1.0f)*0.25f) : 0.0f;
-        out.m2006_torque_nm=clamp(ff_home+pi_home,
-          -c::HOME_M2006_MAX_TORQUE_NM,c::HOME_M2006_MAX_TORQUE_NM);
+        // Constant torque, angle-triggered: no speed loop, no vibration.
+        out.m2006_torque_nm=(err_home>0.0f ? 1.0f : -1.0f)*c::HOME_M2006_FINAL_TORQUE_NM;
         if (std::fabs(err_home)<=c::HOME_M2006_FINAL_TOL_RAD) {
-          m2006_home_done=true;
-          out.m2006_zero_rad=m2006_home_target;  // 以到位位置作为 M2006 零点
+          if (!m2006_settle_since) m2006_settle_since=now;
+          else if (now-m2006_settle_since>=c::HOME_M2006_LOCK_MS) {
+            m2006_home_done=true;
+            out.m2006_zero_rad=m2006_home_target;
+          }
         }
+        else { m2006_settle_since=0; }
         return;  // 6020 保持不受影响（已在上面算完）
       }
       // Deadband: passive inside the band so the two holds stop fighting.
       const float err_m=out.m2006_zero_rad-f.ma;
-      const float wanted_m=std::fabs(err_m)>c::HOME_M2006_HOLD_DEADBAND_RAD ?
-        clamp(c::HOME_M2006_POSITION_KP*err_m,
-          -c::HOME_M2006_MAX_SPEED_RAD_S,c::HOME_M2006_MAX_SPEED_RAD_S) : 0.0f;
-      m_speed_cmd+=clamp(wanted_m-m_speed_cmd,-dv,dv);
-      out.m2006_torque_nm=m_pi.step(m_speed_cmd,f.ms,c::HOME_M2006_SPEED_KP,
-        c::HOME_M2006_SPEED_KI,c::HOME_M2006_MAX_TORQUE_NM,dt);
+      // The lead screw cannot self-lock, so the M2006 must keep holding, accepting a
+      // small nod from the backlash. Soft spring + wide deadband minimises it.
+      m_pi={};
+      m_speed_cmd=0.0f;
+      (void)err_m;
+      out.m2006_torque_nm=0.0f;  // both axes disabled after homing
     }
   }
 };
@@ -266,9 +380,10 @@ bool submit(uint32_t id,uint8_t * data) {
   return true;
 }
 } // namespace
-bool selected() {return c::HOME_MODE;}
+// Selected until the WHOLE homing sequence finishes, then hands over to the follow task.
+bool selected() {return c::HOME_MODE;}  // stays selected: final hold keeps running
 void start() {taskENTER_CRITICAL();start_requested=true;stop_requested=false;taskEXIT_CRITICAL();}
-void cancel() {taskENTER_CRITICAL();stop_requested=true;start_requested=false;
+void cancel() {taskENTER_CRITICAL();finished=false;stop_requested=true;start_requested=false;
   pitch_request=m_request=0.0f;taskEXIT_CRITICAL();}
 Status snapshot() {
   taskENTER_CRITICAL();Status s=latest;s.pitch_rx_frames=pitch_rx;s.m2006_rx_frames=m_rx;
@@ -311,17 +426,69 @@ void run() {
     if (stop) ctrl=Controller{};
     else if (go) ctrl.begin(now);
     ctrl.step(f,now,elapsed*0.001f);
+    const bool handoff=ctrl.out.homed && ctrl.m2006_home_done;
     taskENTER_CRITICAL();
     latest=ctrl.out;pitch_request=ctrl.out.pitch_torque_nm;m_request=ctrl.out.m2006_torque_nm;
     command_stamp=now;
+    // Hand off only when BOTH stages finish. Always restore the interrupt mask
+    // before notifying another task or returning from this task controller.
+    if (handoff && !finished) {
+      finished=true;
+      // Signal ONCE: doing this every cycle re-triggered the buzzer forever.
+      buzzer_signal_homing_done();
+    }
     taskEXIT_CRITICAL();
+
+    // Transmit from here: chassis_task.cpp used to call both transmits each 1 ms.
+    transmit_can1(now);
+    trajectory_follow::transmit_can1(now, true);
     if (elapsed>c::HOME_MAX_STEP_MS) wake=now;
   }
 }
 } // namespace homing
 extern "C" void homing_task(void const * argument) {
   (void)argument;
+  // Enable the CAN1 RX interrupt here: can1.start() used to do it from the chassis task.
+  homing_can_start();
   // The user's independent homing task owns this controller only.
   if (homing::selected()) homing::run();
   for (;;) {vTaskDelay(pdMS_TO_TICKS(100));}
 }
+
+// CAN1 receive pump. It used to live in chassis_task.cpp; with the chassis code moved
+// to another project this project must own it or the gimbal gets no feedback at all.
+static void homing_can_start()
+{
+  // Filter + Start + RX notification all used to be done by can1.config()/can1.start()
+  // inside the (now removed) chassis task. Accept every standard frame.
+  CAN_FilterTypeDef filter = {};
+  filter.FilterBank = 0;
+  filter.FilterMode = CAN_FILTERMODE_IDMASK;
+  filter.FilterScale = CAN_FILTERSCALE_32BIT;
+  filter.FilterIdHigh = 0;
+  filter.FilterIdLow = 0;
+  filter.FilterMaskIdHigh = 0;
+  filter.FilterMaskIdLow = 0;
+  filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+  filter.FilterActivation = ENABLE;
+  filter.SlaveStartFilterBank = 14;
+  HAL_CAN_ConfigFilter(&hcan1, &filter);
+  HAL_CAN_Start(&hcan1);
+  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+}
+
+extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
+{
+  if (hcan != &hcan1) return;
+  CAN_RxHeaderTypeDef header = {};
+  uint8_t data[8] = {};
+  const uint32_t now = xTaskGetTickCount();
+  while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0U) {
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK) break;
+    // Frames the homing does not own must still reach the follow task, otherwise the
+    // yaw/pitch feedback never arrives and the yaw cannot be driven at all.
+    if (!homing::receive_can1(header, data, now))
+      trajectory_follow::receive_can1(header, data, now);
+  }
+}
+

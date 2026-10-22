@@ -129,8 +129,6 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of chassis_task */
-  osThreadDef(chassis_task, StartChassisTask, osPriorityRealtime, 0, 256);
-  chassis_taskHandle = osThreadCreate(osThread(chassis_task), NULL);
 
   /* definition and creation of rc_task */
   osThreadDef(rc_task, StartRcTask, osPriorityNormal, 0, 256);
@@ -209,8 +207,6 @@ void StartChassisTask(void const * argument)
 {
   /* USER CODE BEGIN StartChassisTask */
   /* Infinite loop */
-  extern void chassis_task(void);
-  chassis_task();
   /* USER CODE END StartChassisTask */
 }
 

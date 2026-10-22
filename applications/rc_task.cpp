@@ -1,9 +1,24 @@
+#include "FreeRTOS.h"
+#include "task.h"
 #include "cmsis_os.h"
 #include "io/dbus/dbus.hpp"
 #include "shared_data.hpp"
 #include "usart.h"
 
 sp::DBus remote(&huart3);
+
+// Task-context read-only snapshot: switch, vx/vy/rotation sticks, receive age flag.
+extern "C" void rc_control_diag(uint32_t now_ms, float * values)
+{
+  if (!values) return;
+  taskENTER_CRITICAL();
+  values[0] = static_cast<float>(g_data.sw_r);
+  values[1] = g_data.ch_lv;
+  values[2] = g_data.ch_lh;
+  values[3] = g_data.ch_lu;
+  values[4] = remote.is_alive(now_ms) ? 1.0f : 0.0f;
+  taskEXIT_CRITICAL();
+}
 
 extern "C" void rc_task()
 {

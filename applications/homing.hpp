@@ -26,6 +26,7 @@ struct Status {
   float pitch_zero_rad;  // GM6020 final 60-degree target; RAM only.
   float m2006_zero_rad;
   bool homed;
+  bool m2006_locked;  // 1 = M2006 hold engaged
   bool feedback_fresh;
   uint32_t stamp_ms;
   uint32_t pitch_rx_frames, m2006_rx_frames, tx_errors;
